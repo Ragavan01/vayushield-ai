@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="VayuShield reads live city air quality and winter thermal inversion patterns so families can schedule ventilation, protect indoor air, and plan lower-emission daily routines." />
+  <title>VayuShield — Urban Air Quality and Winter Smog Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles/main.css" />
+</head>
+<body>
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+
+  <header class="site-header" role="banner">
+    <div class="container header-inner">
+      <div class="brand">
+        <a href="#main-content" class="brand-name">VayuShield</a>
+        <span class="brand-divider" aria-hidden="true">/</span>
+        <span class="brand-subtitle">Urban air quality and winter smog assistant</span>
+      </div>
+
+      <nav class="header-nav" aria-label="Page sections">
+        <a href="#telemetry-panel" class="nav-link">Live telemetry</a>
+        <a href="#profile-section" class="nav-link">Household profile</a>
+        <a href="#workspace-section" class="nav-link">Daily routine</a>
+        <button id="btn-open-settings" type="button" class="btn btn-quiet btn-sm" aria-haspopup="dialog" aria-controls="api-modal">
+          <span id="ai-mode-label">Engine: Grounded</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main-content" class="container main-layout" role="main">
+    <!-- Asymmetric Split Hero (Rules 7, 9, 10, 20) -->
+    <section class="hero-split" aria-labelledby="display-headline">
+      <div class="hero-copy">
+        <p class="quiet-meta">Live data via Open-Meteo Air Quality API and CPCB AQI breakpoints</p>
+        <h1 id="display-headline" class="display-headline">
+          Know your air before you breathe it, indoors and on the commute.
+        </h1>
+        <p class="hero-lead">
+          VayuShield pairs real-time city particulate readings with 24-hour winter thermal inversion timing. Families get exact ventilation windows, mask guidance for daily rides, and room-sized indoor filtration plans backed by measured exposure math.
+        </p>
+
+        <div class="hero-actions">
+          <a href="#city-search-input" class="btn btn-primary btn-hero">Check your city</a>
+          <button id="btn-gps" type="button" class="btn btn-secondary btn-hero" aria-label="Detect my current location air quality">
+            Use my location
+          </button>
+        </div>
+
+        <dl class="hero-proof-list" aria-label="Current baseline reading summary">
+          <div class="hero-proof-item">
+            <dt>Current Delhi NCR reading</dt>
+            <dd>AQI 218 (Poor) · PM2.5 95 µg/m³</dd>
+          </div>
+          <div class="hero-proof-item">
+            <dt>Cleanest afternoon flush</dt>
+            <dd>1:30–4:00 PM (projected AQI 170)</dd>
+          </div>
+        </dl>
+      </div>
+
+      <!-- The One Thing Worth Looking At: Live Telemetry & 24-Hour Inversion Instrument Panel -->
+      <div id="telemetry-panel" class="instrument-panel" aria-labelledby="hero-heading">
+        <div class="panel-section">
+          <div class="telemetry-header">
+            <div>
+              <p class="section-label">Live atmospheric telemetry</p>
+              <h2 id="hero-heading" class="telemetry-city">Delhi NCR, India</h2>
+              <p id="hero-source" class="muted-copy">Live Open-Meteo Telemetry · Dominant driver: Thermal inversion, vehicular exhaust, and regional biomass smoke</p>
+            </div>
+            <div id="aqi-pill" class="aqi-readout aqi-poor" role="status" aria-live="polite">
+              <span class="aqi-readout-caption">CPCB AQI</span>
+              <strong id="aqi-value" class="aqi-readout-number">218</strong>
+              <span id="aqi-band" class="aqi-readout-band">Poor</span>
+            </div>
+          </div>
+
+          <form id="city-search-form" class="search-row" role="search" aria-label="Search urban air quality by city">
+            <label for="city-search-input" class="sr-only">Search any city</label>
+            <input id="city-search-input" type="search" maxlength="80" autocomplete="off" placeholder="Search any city (Delhi, Kanpur, Pune, London)" />
+            <button type="submit" class="btn btn-primary">Check AQI</button>
+          </form>
+
+          <div id="city-presets" class="preset-chips" role="group" aria-label="Quick city air quality presets"></div>
+
+          <div class="metrics-strip" aria-label="Measured pollutant readings from Open-Meteo">
+            <div class="metric-cell">
+              <span class="metric-label">PM2.5</span>
+              <strong id="metric-pm25" class="metric-val">95 µg/m³</strong>
+              <span class="metric-source">Open-Meteo</span>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">PM10</span>
+              <strong id="metric-pm10" class="metric-val">97 µg/m³</strong>
+              <span class="metric-source">Open-Meteo</span>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">NO₂</span>
+              <strong id="metric-no2" class="metric-val">18 µg/m³</strong>
+              <span class="metric-source">Open-Meteo</span>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">Passive exposure</span>
+              <strong id="metric-cigs" class="metric-val">4.3 cigs/day</strong>
+              <span class="metric-source">22 µg/m³ eq.</span>
+            </div>
+          </div>
+
+          <div class="advisory-stack">
+            <p id="aqi-summary" class="advisory-line">Health advisory: Winter smog accumulation. Breathing discomfort on prolonged exposure; indoor filtration advised.</p>
+            <p id="aqi-mask" class="advisory-line">Mask guidance: Wear certified N95/KF94 mask outdoors; avoid cloth or loose surgical masks.</p>
+            <p id="aqi-ventilation" class="advisory-line">Ventilation: Keep windows sealed mornings and nights; brief 15-min flush only at 2:00 PM.</p>
+          </div>
+        </div>
+
+        <div class="panel-divider" aria-hidden="true"></div>
+
+        <!-- 24-Hour Thermal Inversion Curve -->
+        <div class="panel-section" aria-labelledby="inversion-heading">
+          <div class="card-header-row">
+            <div>
+              <p class="section-label">Winter smog forecaster</p>
+              <h3 id="inversion-heading" class="panel-subtitle">24-hour thermal inversion curve</h3>
+            </div>
+            <span class="tag tag-accent">Best window: 1:30–4:00 PM</span>
+          </div>
+          <p class="muted-copy spacing-top-8">
+            Cold winter nights trap exhaust near ground level. Plan outdoor errands and brief cross-ventilation during the afternoon mixing dip.
+          </p>
+          <div id="inversion-chart-container" class="chart-frame" aria-label="Projected AQI across 6 daily time windows"></div>
+          <ul id="inversion-legend" class="inversion-list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 Real Feature Cards (Rules 17 & 18: no icon tiles, one factual claim each) -->
+    <section class="section-block" aria-labelledby="capabilities-heading">
+      <div class="section-intro">
+        <p class="section-label">What VayuShield calculates</p>
+        <h2 id="capabilities-heading" class="section-title">Specific daily actions tied to local smog conditions</h2>
+      </div>
+
+      <div class="feature-grid">
+        <article class="surface-card feature-card">
+          <p class="feature-meta">13:30–16:00 mixing dip</p>
+          <h3 class="card-title">Inversion-timed ventilation</h3>
+          <p class="body-copy">
+            Keeps windows sealed during dawn (AQI 292) and overnight (AQI 287) smog traps, scheduling a brief 15-minute flush at 2:00 PM when afternoon mixing drops Delhi NCR to AQI 170.
+          </p>
+        </article>
+
+        <article class="surface-card feature-card">
+          <p class="feature-meta">18 km two-wheeler commute</p>
+          <h3 class="card-title">Commute protection and rush shifts</h3>
+          <p class="body-copy">
+            Matches your 18 km ride with tight-seal N95 valve-less mask guidance, shifts errands out of the 8:30–10:30 AM surge, and flags metro or electric shuttle alternatives above AQI 250.
+          </p>
+        </article>
+
+        <article class="surface-card feature-card">
+          <p class="feature-meta">LPG kitchen and core room</p>
+          <h3 class="card-title">Indoor cooking and family shielding</h3>
+          <p class="body-copy">
+            Pairs continuous kitchen exhaust with electric kettle or induction simmering to cut indoor NO₂ spikes by up to 55%, while isolating one Clean Air Core Room for children and elders from 7 PM to 9 AM.
+          </p>
+        </article>
+
+        <article class="surface-card feature-card">
+          <p class="feature-meta">21:30–06:00 overnight recovery</p>
+          <h3 class="card-title">Sealed sleep dose reduction</h3>
+          <p class="body-copy">
+            Combines under-door draft stoppers, damp mopping instead of dry sweeping, and quiet night filtration to deliver 8 hours of pulmonary recovery and cut total 24-hour PM2.5 dose by 40–65%.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <!-- Household & Commute Profile -->
+    <section id="profile-section" class="section-block" aria-labelledby="profile-heading">
+      <div class="surface-card">
+        <div class="card-header-row">
+          <div>
+            <p class="section-label">Tailor to your location and lifestyle</p>
+            <h2 id="profile-heading" class="section-title-sm">Household and commute profile</h2>
+          </div>
+          <span id="profile-saved-badge" class="tag" role="status" aria-live="polite">Personalization active</span>
+        </div>
+
+        <div class="profile-grid">
+          <div class="field">
+            <label for="profile-household">Household profile</label>
+            <select id="profile-household">
+              <option value="multi-gen">Multi-Generational Family</option>
+              <option value="kids">Family with School Kids</option>
+              <option value="seniors-asthma">Seniors / Asthma Sensitive</option>
+              <option value="general">Young Adults / General</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="profile-commute">Primary commute</label>
+            <select id="profile-commute">
+              <option value="two-wheeler">Two-Wheeler / Scooter</option>
+              <option value="car">Personal Car</option>
+              <option value="public-transit">Metro / Bus Transit</option>
+              <option value="wfh-walk">Work From Home / Walk</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="profile-budget">Indoor IAQ budget</label>
+            <select id="profile-budget">
+              <option value="zero-cost">Zero-Cost Habits (₹0)</option>
+              <option value="diy-budget">DIY Filter Box (~₹2,200)</option>
+              <option value="hepa-smart">True H13 HEPA Purifier</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="profile-cooking">Kitchen fuel setup</label>
+            <select id="profile-cooking">
+              <option value="lpg-no-chimney">LPG (No Chimney)</option>
+              <option value="lpg-exhaust">LPG with Exhaust / Chimney</option>
+              <option value="induction">Electric / Induction</option>
+              <option value="biomass-mixed">Mixed / Solid Fuel</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="profile-room">Primary room size (sq.ft)</label>
+            <input id="profile-room" type="number" min="80" max="1500" step="10" value="220" />
+          </div>
+
+          <div class="field">
+            <label for="profile-km">Daily commute (km)</label>
+            <input id="profile-km" type="number" min="0" max="120" step="2" value="18" />
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Primary Workspace Tabs -->
+    <section id="workspace-section" class="section-block workspace" aria-label="Air quality assistant tools">
+      <div class="tablist" role="tablist" aria-label="Assistant modules">
+        <button id="tab-routine" type="button" role="tab" aria-selected="true" aria-controls="panel-routine" tabindex="0" class="tab-btn is-active">
+          Low-emission routine
+        </button>
+        <button id="tab-iaq" type="button" role="tab" aria-selected="false" aria-controls="panel-iaq" tabindex="-1" class="tab-btn">
+          Indoor air quality lab
+        </button>
+        <button id="tab-impact" type="button" role="tab" aria-selected="false" aria-controls="panel-impact" tabindex="-1" class="tab-btn">
+          Choice impact simulator
+        </button>
+        <button id="tab-coach" type="button" role="tab" aria-selected="false" aria-controls="panel-coach" tabindex="-1" class="tab-btn">
+          Smog coach and community
+        </button>
+      </div>
+
+      <!-- TAB 1: Low-Emission Daily Routine -->
+      <div id="panel-routine" role="tabpanel" aria-labelledby="tab-routine" class="tab-panel">
+        <div class="panel-intro">
+          <div>
+            <h2 class="section-title-sm">Personalized low-emission daily routine</h2>
+            <p class="muted-copy">Time-blocked actions synced to local smog levels, thermal inversion shifts, and your family profile.</p>
+          </div>
+          <button id="btn-copy-routine" type="button" class="btn btn-secondary">Copy family plan</button>
+        </div>
+        <ol id="routine-list" class="routine-timeline"></ol>
+      </div>
+
+      <!-- TAB 2: Indoor Air Quality Hacks & CADR Sizing -->
+      <div id="panel-iaq" role="tabpanel" aria-labelledby="tab-iaq" class="tab-panel" hidden>
+        <div class="panel-intro">
+          <div>
+            <h2 class="section-title-sm">Indoor air quality hacks and filtration sizing</h2>
+            <p class="muted-copy">Measured indoor protection ranked for your room dimensions and budget.</p>
+          </div>
+          <div id="cadr-badge" class="tag tag-accent" role="status"></div>
+        </div>
+        <div id="iaq-grid" class="card-grid-2"></div>
+      </div>
+
+      <!-- TAB 3: Sustainable Swaps & Direct Impact Simulator -->
+      <div id="panel-impact" role="tabpanel" aria-labelledby="tab-impact" class="tab-panel" hidden>
+        <div class="panel-intro">
+          <div>
+            <h2 class="section-title-sm">Sustainable alternatives and direct impact calculator</h2>
+            <p class="muted-copy">Toggle habits to quantify personal PM2.5 reduction, carbon savings, monthly expenses, and neighborhood impact.</p>
+          </div>
+        </div>
+
+        <div class="impact-layout">
+          <fieldset class="swaps-fieldset">
+            <legend class="sr-only">Select sustainable daily alternatives</legend>
+            <div id="swaps-list" class="swaps-list"></div>
+          </fieldset>
+
+          <aside class="surface-card impact-summary-card" aria-live="polite" aria-labelledby="impact-results-heading">
+            <p class="section-label">Direct measurable impact</p>
+            <h3 id="impact-results-heading" class="card-title">Your choice footprint</h3>
+
+            <div class="impact-kpis">
+              <div class="metric-cell">
+                <span class="metric-label">Personal PM2.5 cut</span>
+                <strong id="imp-pm25-pct" class="impact-big">0%</strong>
+                <span id="imp-pm25-detail" class="metric-source">Baseline exposure</span>
+              </div>
+              <div class="metric-cell">
+                <span class="metric-label">Passive cigarettes avoided</span>
+                <strong id="imp-cigs-saved" class="impact-big">0 / day</strong>
+                <span id="imp-cigs-detail" class="metric-source">Lung burden reduction</span>
+              </div>
+              <div class="metric-cell">
+                <span class="metric-label">CO₂ prevented</span>
+                <strong id="imp-co2" class="impact-big">0 kg/mo</strong>
+                <span id="imp-trees" class="metric-source">0 mature trees/yr</span>
+              </div>
+              <div class="metric-cell">
+                <span class="metric-label">Estimated savings</span>
+                <strong id="imp-inr" class="impact-big">₹0 / mo</strong>
+                <span class="metric-source">Fuel, LPG, and health costs</span>
+              </div>
+            </div>
+
+            <div class="meter-block">
+              <div class="meter-label-row">
+                <span>Exposure reduction progress</span>
+                <strong id="imp-meter-label">0%</strong>
+              </div>
+              <progress id="imp-meter" max="78" value="0" aria-label="Personal PM2.5 exposure reduction percentage"></progress>
+            </div>
+
+            <div class="community-multiplier-box">
+              <p class="section-label">Community scale projection</p>
+              <p id="imp-community-text" class="body-copy"></p>
+            </div>
+          </aside>
+        </div>
+      </div>
+
+      <!-- TAB 4: Smog Coach & Community Action Board -->
+      <div id="panel-coach" role="tabpanel" aria-labelledby="tab-coach" class="tab-panel" hidden>
+        <div class="coach-layout">
+          <div class="surface-card">
+            <div class="card-header-row">
+              <div>
+                <p class="section-label">Google Gemini 2.5 Flash</p>
+                <h2 class="section-title-sm">Ask the VayuShield coach</h2>
+              </div>
+              <span id="coach-engine-badge" class="tag">Ready</span>
+            </div>
+
+            <div id="coach-templates" class="preset-chips spacing-top-16" role="group" aria-label="Quick coaching prompt ideas"></div>
+
+            <form id="coach-form" class="coach-form">
+              <label for="coach-input" class="field-label">Your family or community situation</label>
+              <textarea id="coach-input" rows="3" maxlength="360" required placeholder="Example: My elderly father has asthma and our apartment faces a busy road with AQI 218. What should we do tonight?"></textarea>
+              <div>
+                <button id="btn-ask-coach" type="submit" class="btn btn-primary">Generate tailored plan</button>
+              </div>
+            </form>
+
+            <div id="coach-output" class="coach-output" aria-live="polite"></div>
+          </div>
+
+          <div class="surface-card">
+            <div class="card-header-row">
+              <div>
+                <p class="section-label">Neighborhood clean-air network</p>
+                <h2 class="section-title-sm">Community action pledges</h2>
+              </div>
+              <span id="pledge-count" class="tag">0 active</span>
+            </div>
+            <p class="muted-copy spacing-top-8">Share local anti-smog actions—such as school carpools, zero leaf-burning drives, or damp morning sweeping.</p>
+
+            <form id="pledge-form" class="pledge-form spacing-top-16">
+              <div class="field">
+                <label for="pledge-neighborhood">Neighborhood or apartment</label>
+                <input id="pledge-neighborhood" type="text" maxlength="60" required placeholder="Example: Indiranagar Block 3 or Sector 18 RWA" />
+              </div>
+              <div class="field">
+                <label for="pledge-action">Clean-air action</label>
+                <input id="pledge-action" type="text" maxlength="140" required placeholder="Example: Starting a 4-family carpool school run and composting winter leaves" />
+              </div>
+              <div>
+                <button type="submit" class="btn btn-secondary">Post community pledge</button>
+              </div>
+            </form>
+
+            <ul id="pledge-list" class="pledge-list"></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Accessible Gemini API Settings Dialog -->
+  <div id="api-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-title" hidden>
+    <div class="modal-card">
+      <div class="card-header-row">
+        <h2 id="modal-title" class="section-title-sm">Google Gemini engine settings</h2>
+        <button id="btn-close-modal" type="button" class="btn btn-quiet btn-sm" aria-label="Close settings dialog">Close</button>
+      </div>
+      <p class="muted-copy spacing-top-8">
+        VayuShield connects to its server-side Gemini proxy when deployed with <code>GEMINI_API_KEY</code>, and falls back to its local grounded model offline. You can optionally enter a session-only Gemini API key for live testing.
+      </p>
+      <form id="api-settings-form" class="modal-form spacing-top-16">
+        <div class="field">
+          <label for="gemini-key-input">Optional session Gemini API key</label>
+          <input id="gemini-key-input" type="password" autocomplete="off" placeholder="AIza..." />
+        </div>
+        <div class="modal-actions">
+          <button type="submit" class="btn btn-primary">Save for session</button>
+          <button id="btn-clear-key" type="button" class="btn btn-secondary">Clear key</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+
+  <footer class="site-footer" role="contentinfo">
+    <div class="container footer-inner">
+      <p><strong>VayuShield</strong> · Urban air quality and winter smog assistant · PromptWars Virtual Challenge 06</p>
+      <p class="muted-copy">Informational guidance only; consult a physician for medical or respiratory emergencies.</p>
+    </div>
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
