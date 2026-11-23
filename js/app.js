@@ -1,11 +1,13 @@
 /**
- * @fileoverview VayuShield 2.0 Application Controller.
- * Coordinates all 8 intelligence modules with:
+ * @fileoverview VayuShield Project APEX (v3.0) Application Controller.
+ * Coordinates all 8 environmental intelligence modules with:
  * - Zero innerHTML and zero inline style mutations (strict CSP compliant)
- * - Race-condition protection via monotonic request tokens
- * - Explicit error/retry states (never substitutes another city on API failure)
- * - Interactive 24h / 7d / 30d historical SVG trend charts & 24h dispersion charts
- * - WCAG 2.2 AA roving-tab keyboard navigation and live-region announcements
+ * - Circular SVG AQI arc gauge centerpiece with smooth semantic stroke mapping
+ * - Debounced global city autocomplete combobox with full keyboard navigation
+ * - Persisted location selection (never silently resets to Delhi on reload)
+ * - Safe RFC-4180 CSV historical dataset export & non-sensitive summary sharing
+ * - Multi-turn frosted-glass AI Coach thread with Copy, Retry, and Clear controls
+ * - Scroll-synchronized desktop navigation bar & mobile bottom glass dock
  */
 
 import { compareToWhoGuideline } from './core/cpcbAqi.js';
@@ -24,16 +26,29 @@ import { buildImmediateAction, buildIntelligentRoutine } from './core/routineEng
 import { clearNode, createSafeElement, sanitizeText } from './core/security.js';
 import { askVayuShieldCoach, COACH_PROMPT_TEMPLATES } from './services/aiAssistantService.js';
 import {
-  clearAirQualityCache,
+  buildHistoricalCsv,
   CURATED_CITIES,
   fetchAirIntelligence,
-  geocodeCity
+  geocodeCity,
+  searchCitySuggestions
 } from './services/airQualityService.js';
 
+const STORAGE_LOCATION_KEY = 'vayushield_location_v3';
 const STORAGE_PROFILE_KEY = 'vayushield_profile_v2';
 const STORAGE_SCENARIOS_KEY = 'vayushield_scenarios_v2';
 const STORAGE_PLEDGES_KEY = 'vayushield_pledges_v2';
 const SVG_NS = 'http://www.w3.org/2000/svg';
+const AQI_ARC_LENGTH = 145;
+
+const AQI_ARC_COLORS = Object.freeze({
+  good: '#34D399',
+  satisfactory: '#4ADE80',
+  moderate: '#FBBF24',
+  poor: '#FB923C',
+  'very-poor': '#F87171',
+  severe: '#FB7185',
+  neutral: '#38BDF8'
+});
 
 const DEFAULT_PLEDGES = [
   {
@@ -62,21 +77,6 @@ const DEFAULT_PLEDGES = [
   }
 ];
 
-const state = {
-  location: { ...CURATED_CITIES[0] },
-  pastDays: 1,
-  intel: null,
-  indoorEval: null,
-  profile: loadJson(STORAGE_PROFILE_KEY, normalizeProfile()),
-  selectedScenarios: loadJson(STORAGE_SCENARIOS_KEY, ['transit-shift', 'sleep-filtration', 'fitted-n95']),
-  pledges: loadJson(STORAGE_PLEDGES_KEY, DEFAULT_PLEDGES),
-  activePledgeFilter: 'all',
-  customAch: null,
-  customCadr: null,
-  fetchToken: 0,
-  coachToken: 0
-};
-
 function loadJson(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -90,9 +90,49 @@ function saveJson(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    // Ignore private-browsing storage restrictions gracefully
+    // Gracefully ignore restricted storage contexts
   }
 }
+
+function loadSavedLocation() {
+  const saved = loadJson(STORAGE_LOCATION_KEY, null);
+  if (
+    saved &&
+    typeof saved.name === 'string' &&
+    typeof saved.lat === 'number' &&
+    typeof saved.lon === 'number' &&
+    Number.isFinite(saved.lat) &&
+    Number.isFinite(saved.lon)
+  ) {
+    return {
+      name: sanitizeText(saved.name, 60) || CURATED_CITIES[0].name,
+      region: sanitizeText(saved.region, 80) || 'Saved Location',
+      lat: saved.lat,
+      lon: saved.lon
+    };
+  }
+  return { ...CURATED_CITIES[0] };
+}
+
+const state = {
+  location: loadSavedLocation(),
+  pastDays: 1,
+  intel: null,
+  indoorEval: null,
+  profile: loadJson(STORAGE_PROFILE_KEY, normalizeProfile()),
+  selectedScenarios: loadJson(STORAGE_SCENARIOS_KEY, ['transit-shift', 'sleep-filtration', 'fitted-n95']),
+  pledges: loadJson(STORAGE_PLEDGES_KEY, DEFAULT_PLEDGES),
+  activePledgeFilter: 'all',
+  customAch: null,
+  customCadr: null,
+  fetchToken: 0,
+  coachToken: 0,
+  coachHistory: [],
+  suggestions: [],
+  highlightedSuggestion: -1,
+  searchDebounceTimer: null,
+  searchSeq: 0
+};
 
 function createSvg(tag, attrs = {}) {
   const el = document.createElementNS(SVG_NS, tag);
@@ -126,10 +166,8 @@ function formatLocalTimestamp(iso) {
 }
 
 function setLoadingState(isLoading) {
-  const card = document.getElementById('telemetry-card');
-  const disp = document.getElementById('dispersion-module');
-  card?.classList.toggle('is-loading', isLoading);
-  disp?.classList.toggle('is-loading', isLoading);
+  document.getElementById('telemetry-card')?.classList.toggle('is-loading', isLoading);
+  document.getElementById('dispersion-module')?.classList.toggle('is-loading', isLoading);
   const freshness = document.getElementById('freshness-badge');
   if (isLoading && freshness) {
     freshness.textContent = 'Updating…';
@@ -148,7 +186,31 @@ function hideErrorBanner() {
   document.getElementById('error-banner').hidden = true;
 }
 
+function setActiveLocation(loc, options = {}) {
+  state.location = {
+    name: sanitizeText(loc.name, 60) || 'Selected Location',
+    region: sanitizeText(loc.region, 80) || `${loc.lat}°, ${loc.lon}°`,
+    lat: Number(loc.lat),
+    lon: Number(loc.lon)
+  };
+  // Persist city selections (avoid persisting unnamed raw GPS coordinates without explicit need)
+  if (options.persist !== false) {
+    saveJson(STORAGE_LOCATION_KEY, state.location);
+  }
+}
+
 /* ==================== MODULE 1: LIVE AIR INTELLIGENCE ==================== */
+
+function updateAqiGauge(aqi, bandId) {
+  const arc = document.getElementById('aqi-arc-fill');
+  if (!arc) return;
+  const ratio = typeof aqi === 'number' && Number.isFinite(aqi)
+    ? Math.max(0.04, Math.min(1, aqi / 500))
+    : 0;
+  const offset = Number((AQI_ARC_LENGTH * (1 - ratio)).toFixed(1));
+  arc.setAttribute('stroke-dashoffset', String(offset));
+  arc.setAttribute('stroke', AQI_ARC_COLORS[bandId] || AQI_ARC_COLORS.neutral);
+}
 
 function renderCityPresets() {
   const container = document.getElementById('city-presets');
@@ -162,7 +224,8 @@ function renderCityPresets() {
       attrs: { type: 'button', 'aria-pressed': String(isActive) }
     });
     btn.addEventListener('click', () => {
-      state.location = { ...city };
+      closeSuggestions();
+      setActiveLocation(city);
       loadLocationIntelligence();
     });
     container.appendChild(btn);
@@ -179,9 +242,11 @@ function renderLiveIntelligence() {
   const freshnessEl = document.getElementById('freshness-badge');
   freshnessEl.textContent = `${metadata.freshness} · Valid ${formatLocalTimestamp(current.timestamp)}`;
   freshnessEl.className = `badge badge-${metadata.freshnessState?.badgeTone || 'teal'}`;
+
   if (metadata.isStaleFallback && metadata.staleWarning) {
     showErrorBanner('Displaying Stale Cached Data', metadata.staleWarning);
   }
+
   const trendEl = document.getElementById('trend-badge');
   const trendLabel = dispersion.available
     ? `6h Trend: ${dispersion.trend} (${dispersion.trendDeltaPct >= 0 ? '+' : ''}${dispersion.trendDeltaPct}%)`
@@ -199,16 +264,17 @@ function renderLiveIntelligence() {
   document.getElementById('location-meta').textContent =
     `${formatCoord(location.lat, 'N', 'S')}, ${formatCoord(location.lon, 'E', 'W')} · Timezone: ${location.timezone}`;
 
-  // AQI Readout
+  // Circular AQI Centerpiece
   const aqiBox = document.getElementById('aqi-box');
   document.getElementById('aqi-standard-label').textContent = cpcb.isOfficialCpcb
     ? 'Official CPCB AQI'
     : 'CPCB-Derived Est.';
   document.getElementById('aqi-value').textContent = cpcb.aqi !== null ? String(cpcb.aqi) : 'N/A';
   document.getElementById('aqi-band').textContent = cpcb.band?.label || 'Incomplete';
-  aqiBox.className = `aqi-box aqi-${cpcb.band?.id || 'neutral'}`;
+  aqiBox.className = `aqi-centerpiece aqi-${cpcb.band?.id || 'neutral'}`;
+  updateAqiGauge(cpcb.aqi, cpcb.band?.id || 'neutral');
 
-  // First-Screen Immediate Action Callout
+  // Immediate Action Callout
   const immediate = buildImmediateAction(intel, state.profile);
   const callout = document.getElementById('immediate-action');
   callout.className = `action-callout action-${immediate.level}`;
@@ -233,7 +299,7 @@ function renderLiveIntelligence() {
     whoBadge.className = 'badge badge-neutral';
   }
 
-  // 6-Pollutant Breakdown Grid (PM2.5, PM10, NO2, SO2, O3, CO)
+  // 6-Pollutant Breakdown Widgets
   const grid = document.getElementById('pollutant-grid');
   clearNode(grid);
 
@@ -259,6 +325,7 @@ function renderLiveIntelligence() {
 
     const cell = createSafeElement(document, 'div', {
       className: `pollutant-cell${isPrimary ? ' is-primary' : ''}`,
+      attrs: { title: `${item.label} ${item.avg}: ${valStr}. CPCB sub-index: ${sub ? sub.subIndex : 'N/A'}.` },
       children: [
         createSafeElement(document, 'div', {
           className: 'pollutant-head',
@@ -279,7 +346,7 @@ function renderLiveIntelligence() {
 
   // Provenance Drawer
   document.getElementById('meta-provider-line').textContent =
-    `Air Quality Source: ${metadata.provider} (${metadata.gridResolution}). Weather Source: ${metadata.weatherProvider}.`;
+    `Air Quality Source: ${metadata.provider} (${metadata.gridResolution}, ${metadata.temporalResolution}). Weather Source: ${metadata.weatherProvider}. Retrieved: ${metadata.fetchedAt}.`;
   document.getElementById('meta-averaging-line').textContent =
     `${cpcb.methodologyLabel}. ${metadata.averagingNote} NH₃ and Pb are not supplied by Open-Meteo CAMS.`;
 
@@ -343,10 +410,9 @@ function renderHistoryChart() {
     'aria-label': `Historical modeled PM2.5 over past ${history.pastDays} days. Min ${minVal}, average ${avgVal}, max ${maxVal} micrograms per cubic meter. Dashed green line marks WHO 2021 24-hour guideline (15), amber line marks CPCB Satisfactory upper limit (60).`
   });
 
-  // Labeled Reference Lines (WHO 2021 15 ug/m3 & CPCB Satisfactory 60 ug/m3)
   const thresholds = [
-    { val: 15, color: '#22C55E', label: 'WHO 15' },
-    { val: 60, color: '#F59E0B', label: 'CPCB 60' }
+    { val: 15, color: '#34D399', label: 'WHO 15' },
+    { val: 60, color: '#FBBF24', label: 'CPCB 60' }
   ];
   for (const th of thresholds) {
     if (th.val <= maxVal) {
@@ -363,7 +429,6 @@ function renderHistoryChart() {
     }
   }
 
-  // Build disconnected polyline segments across missing/null points (never fabricate interpolation)
   let currentSegment = [];
   const segments = [];
   sampled.forEach((pt, i) => {
@@ -393,7 +458,7 @@ function renderHistoryChart() {
     }
     for (const node of seg) {
       const dot = createSvg('circle', {
-        cx: node.x, cy: node.y, r: '2.5', fill: '#2DD4BF', opacity: '0.85'
+        cx: node.x, cy: node.y, r: '2.5', fill: '#2DD4BF', opacity: '0.9'
       });
       const tip = createSvg('title');
       tip.textContent = `${node.pt.time.replace('T', ' ')} — Modeled PM2.5: ${node.pt.pm25} µg/m³`;
@@ -403,10 +468,10 @@ function renderHistoryChart() {
   }
 
   const axisLabels = [
-    { x: padL - 6, y: padT + 4, anchor: 'end', text: String(Math.round(maxVal)), fill: '#94A3B8' },
-    { x: padL - 6, y: padT + plotH, anchor: 'end', text: '0', fill: '#94A3B8' },
-    { x: padL, y: height - 6, anchor: 'start', text: sampled[0].time.slice(5, 16).replace('T', ' '), fill: '#94A3B8' },
-    { x: width - padR, y: height - 6, anchor: 'end', text: `Min ${minVal} · Avg ${avgVal} · Max ${maxVal} µg/m³`, fill: '#CBD5E1' }
+    { x: padL - 6, y: padT + 4, anchor: 'end', text: String(Math.round(maxVal)), fill: '#93A4BA' },
+    { x: padL - 6, y: padT + plotH, anchor: 'end', text: '0', fill: '#93A4BA' },
+    { x: padL, y: height - 6, anchor: 'start', text: sampled[0].time.slice(5, 16).replace('T', ' '), fill: '#93A4BA' },
+    { x: width - padR, y: height - 6, anchor: 'end', text: `Min ${minVal} · Avg ${avgVal} · Max ${maxVal} µg/m³`, fill: '#C8D4E3' }
   ];
   for (const l of axisLabels) {
     const t = createSvg('text', { x: l.x, y: l.y, 'text-anchor': l.anchor, fill: l.fill, 'font-size': '10' });
@@ -467,7 +532,6 @@ function renderDispersionModule() {
   document.getElementById('dispersion-methodology-text').textContent = dispersion.methodologyNote;
   document.getElementById('dispersion-confidence-reason').textContent = dispersion.confidence.reason;
 
-  // Render 24-Hour Hourly Forecast Bar Chart
   const chartWrap = document.getElementById('dispersion-chart-wrap');
   const timeline = document.getElementById('dispersion-timeline');
   clearNode(chartWrap);
@@ -483,7 +547,7 @@ function renderDispersionModule() {
 
   const hours = dispersion.hourly;
   const maxPm = Math.max(40, ...hours.map((h) => h.pm25));
-  const bestStart = dispersion.bestOutdoorWindow?.startHour;
+  const bestStart = dayWin?.startHour;
   const width = 460;
   const height = 148;
   const padL = 28;
@@ -499,28 +563,28 @@ function renderDispersionModule() {
     viewBox: `0 0 ${width} ${height}`,
     class: 'chart-svg',
     role: 'img',
-    'aria-label': `Next 24-hour modeled hourly PM2.5 forecast. Cleanest window ${dispersion.bestOutdoorWindow?.label}, peak window ${dispersion.peakAccumulationWindow?.label}.`
+    'aria-label': `Next 24-hour modeled hourly PM2.5 forecast. Best daytime window ${dayWin?.label}, peak window ${peakWin?.label}.`
   });
 
   hours.forEach((h, idx) => {
     const x = padL + idx * (barW + barGap);
     const bh = Math.max(6, (h.pm25 / maxPm) * plotH);
     const y = padT + plotH - bh;
-    const isBest = h.hourLabel === bestStart || (h.pm25 <= (dispersion.bestOutdoorWindow?.avgPm25 || 0) * 1.05);
-    const fill = isBest
+    const isBestDay = h.isDaytime && (h.hourLabel === bestStart || (dayWin && h.pm25 <= dayWin.avgPm25 * 1.05));
+    const fill = isBestDay
       ? '#2DD4BF'
       : h.pm25 > 120
-        ? '#EF4444'
+        ? '#F87171'
         : h.pm25 > 60
-          ? '#F59E0B'
+          ? '#FBBF24'
           : '#38BDF8';
 
-   const bar = createSvg('rect', {
+    const bar = createSvg('rect', {
       x: x.toFixed(1),
       y: y.toFixed(1),
       width: barW.toFixed(1),
       height: bh.toFixed(1),
-      rx: '2',
+      rx: '2.5',
       fill
     });
     const tip = createSvg('title');
@@ -533,7 +597,7 @@ function renderDispersionModule() {
         x: (x + barW / 2).toFixed(1),
         y: height - 6,
         'text-anchor': 'middle',
-        fill: '#94A3B8',
+        fill: '#93A4BA',
         'font-size': '9.5'
       });
       lbl.textContent = h.hourLabel;
@@ -545,7 +609,7 @@ function renderDispersionModule() {
     x: padL - 4,
     y: padT + 4,
     'text-anchor': 'end',
-    fill: '#94A3B8',
+    fill: '#93A4BA',
     'font-size': '9.5'
   });
   maxLbl.textContent = String(Math.round(maxPm));
@@ -553,7 +617,6 @@ function renderDispersionModule() {
 
   chartWrap.appendChild(svg);
 
-  // 6 evenly spaced 4-hour checkpoints
   for (let i = 0; i < hours.length; i += 4) {
     const pt = hours[i];
     const row = createSafeElement(document, 'div', {
@@ -562,16 +625,14 @@ function renderDispersionModule() {
         createSafeElement(document, 'span', {
           text: `${pt.hourLabel} · ${pt.dispersionCategory}${pt.blh ? ` (BLH ${pt.blh} m)` : ''}`
         }),
-        createSafeElement(document, 'strong', {
-          text: `${pt.pm25} µg/m³`
-        })
+        createSafeElement(document, 'strong', { text: `${pt.pm25} µg/m³` })
       ]
     });
     timeline.appendChild(row);
   }
 }
 
-/* ==================== MODULE 4: INTELLIGENT DAILY ROUTINE ==================== */
+/* ==================== MODULE 4–6: ROUTINE, IAQ LAB & SIMULATOR ==================== */
 
 function renderRoutine() {
   const list = document.getElementById('routine-list');
@@ -599,8 +660,6 @@ function renderRoutine() {
   }
 }
 
-/* ==================== MODULE 5: INDOOR AIR QUALITY LAB ==================== */
-
 function renderIndoorLab() {
   const outdoorPm25 = state.intel?.rollingAverages?.pm25_24h ?? state.intel?.current?.pm25 ?? 120;
   const indoorSourceId = state.profile.cookingFuel === 'induction'
@@ -621,7 +680,6 @@ function renderIndoorLab() {
 
   state.indoorEval = evalResult;
 
-  // Keep numeric comparison inputs synchronized on initial run
   const achInput = document.getElementById('iaq-ach-input');
   const cadrInput = document.getElementById('iaq-cadr-input');
   if (state.customAch === null) achInput.value = String(evalResult.sizing.recommendedAch);
@@ -638,7 +696,6 @@ function renderIndoorLab() {
   document.getElementById('iaq-reduction').textContent =
     `-${evalResult.outcomes.reductionPct}% (${evalResult.sizing.effectiveFiltrationAch} eACH)`;
 
-  // CSP-safe SVG visual comparison bars (zero inline style attributes)
   const barBox = document.getElementById('iaq-visual-bar');
   clearNode(barBox);
   const maxRef = Math.max(25, outdoorPm25, evalResult.outcomes.unfilteredIndoorPm25);
@@ -650,38 +707,27 @@ function renderIndoorLab() {
   });
 
   const rows = [
-    { label: `Outdoor Modeled (${outdoorPm25} µg/m³)`, val: outdoorPm25, fill: '#F59E0B', y: 12 },
-    { label: `Indoor Unfiltered (${evalResult.outcomes.unfilteredIndoorPm25} µg/m³)`, val: evalResult.outcomes.unfilteredIndoorPm25, fill: '#EF4444', y: 40 },
+    { label: `Outdoor Modeled (${outdoorPm25} µg/m³)`, val: outdoorPm25, fill: '#FBBF24', y: 12 },
+    { label: `Indoor Unfiltered (${evalResult.outcomes.unfilteredIndoorPm25} µg/m³)`, val: evalResult.outcomes.unfilteredIndoorPm25, fill: '#F87171', y: 40 },
     { label: `Indoor Filtered @ ${evalResult.sizing.activeCadrM3h} m³/h (${evalResult.outcomes.filteredIndoorPm25} µg/m³)`, val: evalResult.outcomes.filteredIndoorPm25, fill: '#2DD4BF', y: 68 }
   ];
 
   for (const r of rows) {
-    const labelEl = createSvg('text', { x: '0', y: String(r.y), fill: '#CBD5E1', 'font-size': '10.5' });
+    const labelEl = createSvg('text', { x: '0', y: String(r.y), fill: '#C8D4E3', 'font-size': '10.5' });
     labelEl.textContent = r.label;
     svg.appendChild(labelEl);
 
     svg.appendChild(createSvg('rect', {
-      x: '245',
-      y: String(r.y - 9),
-      width: '310',
-      height: '10',
-      rx: '4',
-      fill: '#142033'
+      x: '245', y: String(r.y - 9), width: '310', height: '10', rx: '5', fill: 'rgba(255,255,255,0.08)'
     }));
 
     const fillW = Math.max(6, Math.round((r.val / maxRef) * 310));
     svg.appendChild(createSvg('rect', {
-      x: '245',
-      y: String(r.y - 9),
-      width: String(fillW),
-      height: '10',
-      rx: '4',
-      fill: r.fill
+      x: '245', y: String(r.y - 9), width: String(fillW), height: '10', rx: '5', fill: r.fill
     }));
   }
   barBox.appendChild(svg);
 
-  // Budget Tiers
   const tiersGrid = document.getElementById('iaq-tiers-grid');
   clearNode(tiersGrid);
   for (const tier of evalResult.tiers) {
@@ -709,15 +755,12 @@ function renderIndoorLab() {
     tiersGrid.appendChild(card);
   }
 
-  // Safety & Gas vs Particle Distinction Notes
   const safetyBox = document.getElementById('iaq-safety-notes');
   clearNode(safetyBox);
   for (const note of evalResult.safetyNotes) {
     safetyBox.appendChild(createSafeElement(document, 'p', { className: 'muted-text', text: note }));
   }
 }
-
-/* ==================== MODULE 6: SUSTAINABLE IMPACT SIMULATOR ==================== */
 
 function renderImpactSimulator() {
   const outdoorPm25 = state.intel?.rollingAverages?.pm25_24h ?? state.intel?.current?.pm25 ?? 120;
@@ -781,7 +824,7 @@ function renderImpactSimulator() {
   document.getElementById('imp-disclaimer').textContent = result.methodologyDisclaimer;
 }
 
-/* ==================== MODULE 7: VAYUSHIELD AI COACH ==================== */
+/* ==================== MODULE 7: MULTI-TURN LIQUID GLASS AI COACH ==================== */
 
 function renderCoachTemplates() {
   const row = document.getElementById('coach-templates');
@@ -800,12 +843,34 @@ function renderCoachTemplates() {
   }
 }
 
-function renderCoachResult(res) {
+function formatCoachPlainText(res) {
+  return [
+    res.headline,
+    '',
+    'Telemetry & Facts Used:',
+    ...(res.factsUsed || []).map((f) => `- ${f}`),
+    '',
+    'Recommendations:',
+    ...(res.recommendations || []).map((r) => `- ${r}`),
+    '',
+    `Indoor Guidance: ${res.indoorGuidance || ''}`,
+    '',
+    'Assumptions & Limits:',
+    ...(res.assumptionsAndLimits || []).map((a) => `- ${a}`)
+  ].join('\n');
+}
+
+function renderCoachThread() {
   const out = document.getElementById('coach-output');
   clearNode(out);
-  const badge = document.getElementById('coach-engine-badge');
-  badge.textContent = res.engine;
-  badge.className = `badge ${res.isFallback ? 'badge-warn' : 'badge-teal'}`;
+
+  if (state.coachHistory.length === 0) {
+    out.appendChild(createSafeElement(document, 'p', {
+      className: 'muted-text',
+      text: 'Select a suggested question above or ask anything about current air quality, dispersion windows, or indoor filtration.'
+    }));
+    return;
+  }
 
   const makeListSection = (title, items) => createSafeElement(document, 'div', {
     children: [
@@ -817,29 +882,98 @@ function renderCoachResult(res) {
     ]
   });
 
-  const card = createSafeElement(document, 'article', {
-    className: 'coach-card',
-    children: [
-      createSafeElement(document, 'h3', { className: 'panel-title', text: res.headline }),
-      makeListSection('Telemetry & Facts Used', res.factsUsed),
-      makeListSection('Evidence-Based Recommendations', res.recommendations),
-      createSafeElement(document, 'div', {
+  // Render newest turns at the top or chronological bottom — chronological matches familiar chat UX
+  for (const turn of state.coachHistory) {
+    out.appendChild(createSafeElement(document, 'div', {
+      className: 'chat-bubble-user',
+      text: turn.question
+    }));
+
+    if (turn.loading) {
+      out.appendChild(createSafeElement(document, 'div', {
+        className: 'coach-card is-loading',
         children: [
-          createSafeElement(document, 'h4', { className: 'coach-section-title', text: 'Indoor Air & Filtration Guidance' }),
-          createSafeElement(document, 'p', { className: 'routine-action', text: res.indoorGuidance })
+          createSafeElement(document, 'p', {
+            className: 'muted-text',
+            text: `Analyzing live ${state.location.name} telemetry and room physics…`
+          })
         ]
-      }),
-      makeListSection('Assumptions, Uncertainties & Limits', res.assumptionsAndLimits)
-    ]
-  });
-  out.appendChild(card);
+      }));
+      continue;
+    }
+
+    const res = turn.response;
+    const copyBtn = createSafeElement(document, 'button', {
+      className: 'btn btn-ghost btn-sm',
+      text: 'Copy Response',
+      attrs: { type: 'button' }
+    });
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(formatCoachPlainText(res));
+        showToast('Copied AI Coach response.');
+      } catch {
+        showToast('Clipboard access unavailable in this browser.');
+      }
+    });
+
+    const retryBtn = createSafeElement(document, 'button', {
+      className: 'btn btn-ghost btn-sm',
+      text: 'Retry',
+      attrs: { type: 'button' }
+    });
+    retryBtn.addEventListener('click', () => handleCoachSubmit(turn.question));
+
+    const card = createSafeElement(document, 'article', {
+      className: 'coach-card',
+      children: [
+        createSafeElement(document, 'h3', { className: 'panel-title', text: res.headline }),
+        makeListSection('Telemetry & Facts Used', res.factsUsed),
+        makeListSection('Evidence-Based Recommendations', res.recommendations),
+        createSafeElement(document, 'div', {
+          children: [
+            createSafeElement(document, 'h4', { className: 'coach-section-title', text: 'Indoor Air & Filtration Guidance' }),
+            createSafeElement(document, 'p', { className: 'routine-action', text: res.indoorGuidance })
+          ]
+        }),
+        makeListSection('Assumptions, Uncertainties & Limits', res.assumptionsAndLimits),
+        createSafeElement(document, 'div', {
+          className: 'coach-card-footer',
+          children: [
+            createSafeElement(document, 'span', {
+              className: `badge ${res.isFallback ? 'badge-warn' : 'badge-teal'}`,
+              text: res.engine
+            }),
+            createSafeElement(document, 'div', {
+              className: 'action-group',
+              children: [copyBtn, retryBtn]
+            })
+          ]
+        })
+      ]
+    });
+    out.appendChild(card);
+  }
 }
 
-async function handleCoachSubmit(question) {
+async function handleCoachSubmit(rawQuestion, options = {}) {
+  const question = sanitizeText(rawQuestion, 360) || COACH_PROMPT_TEMPLATES[0].prompt;
   const token = ++state.coachToken;
   const btn = document.getElementById('btn-ask-coach');
   btn.disabled = true;
   btn.textContent = 'Evaluating Telemetry…';
+
+  if (options.resetThread) {
+    state.coachHistory = [];
+  }
+
+  const turn = { id: token, question, loading: true, response: null };
+  state.coachHistory.push(turn);
+  // Cap in-memory thread length to keep DOM lean
+  if (state.coachHistory.length > 8) {
+    state.coachHistory = state.coachHistory.slice(-8);
+  }
+  renderCoachThread();
 
   const result = await askVayuShieldCoach({
     question,
@@ -849,7 +983,14 @@ async function handleCoachSubmit(question) {
   });
 
   if (token !== state.coachToken) return;
-  renderCoachResult(result);
+  turn.loading = false;
+  turn.response = result;
+
+  const badge = document.getElementById('coach-engine-badge');
+  badge.textContent = result.engine;
+  badge.className = `badge ${result.isFallback ? 'badge-warn' : 'badge-teal'}`;
+
+  renderCoachThread();
   btn.disabled = false;
   btn.textContent = 'Ask VayuShield AI';
 }
@@ -869,7 +1010,6 @@ function renderCommunity() {
     text: `${stats.totalSupporters} Total Supporters`
   }));
 
-  // Filter chips
   const filterRow = document.getElementById('pledge-filter-row');
   clearNode(filterRow);
   const filters = [{ id: 'all', label: 'All Categories' }, ...ACTION_CATEGORIES];
@@ -887,7 +1027,6 @@ function renderCommunity() {
     filterRow.appendChild(btn);
   }
 
-  // Pledge list
   const list = document.getElementById('pledge-list');
   clearNode(list);
   const categoryLabels = Object.fromEntries(ACTION_CATEGORIES.map((c) => [c.id, c.label]));
@@ -941,6 +1080,64 @@ function renderCommunity() {
   }
 }
 
+/* ==================== AUTOCOMPLETE COMBOBOX ==================== */
+
+function closeSuggestions() {
+  const list = document.getElementById('search-suggestions');
+  const input = document.getElementById('city-search-input');
+  state.suggestions = [];
+  state.highlightedSuggestion = -1;
+  if (list) {
+    clearNode(list);
+    list.hidden = true;
+  }
+  input?.setAttribute('aria-expanded', 'false');
+}
+
+function renderSuggestions(items, emptyMessage = null) {
+  const list = document.getElementById('search-suggestions');
+  const input = document.getElementById('city-search-input');
+  clearNode(list);
+
+  if (!items.length) {
+    if (emptyMessage) {
+      list.appendChild(createSafeElement(document, 'li', {
+        className: 'muted-text',
+        attrs: { role: 'option', 'aria-disabled': 'true' },
+        text: emptyMessage
+      }));
+      list.hidden = false;
+      input.setAttribute('aria-expanded', 'true');
+    } else {
+      closeSuggestions();
+    }
+    return;
+  }
+
+  items.forEach((loc, idx) => {
+    const btn = createSafeElement(document, 'button', {
+      className: `suggestion-item${idx === state.highlightedSuggestion ? ' is-highlighted' : ''}`,
+      attrs: { type: 'button', role: 'option', 'aria-selected': String(idx === state.highlightedSuggestion) },
+      children: [
+        createSafeElement(document, 'strong', { text: loc.name }),
+        createSafeElement(document, 'span', { className: 'muted-text', text: loc.region })
+      ]
+    });
+    btn.addEventListener('click', () => {
+      input.value = '';
+      document.getElementById('btn-clear-search').hidden = true;
+      closeSuggestions();
+      setActiveLocation(loc);
+      loadLocationIntelligence();
+      showToast(`Loaded modeled atmospheric data for ${loc.name}.`);
+    });
+    list.appendChild(createSafeElement(document, 'li', { children: [btn] }));
+  });
+
+  list.hidden = false;
+  input.setAttribute('aria-expanded', 'true');
+}
+
 /* ==================== ORCHESTRATION & EVENTS ==================== */
 
 function renderDependentModules() {
@@ -964,8 +1161,8 @@ async function loadLocationIntelligence(forceRefresh = false) {
     renderLiveIntelligence();
     renderDispersionModule();
     renderDependentModules();
-    const activeQ = document.getElementById('coach-input').value.trim() || COACH_PROMPT_TEMPLATES[0].prompt;
-    handleCoachSubmit(activeQ);
+    const initialQ = COACH_PROMPT_TEMPLATES[0].prompt;
+    handleCoachSubmit(initialQ, { resetThread: true });
   } catch (err) {
     if (token !== state.fetchToken) return;
     showErrorBanner(
@@ -978,6 +1175,7 @@ async function loadLocationIntelligence(forceRefresh = false) {
     if (token === state.fetchToken) setLoadingState(false);
   }
 }
+
 function syncProfileInputs() {
   document.getElementById('profile-household').value = state.profile.householdProfile;
   document.getElementById('profile-commute').value = state.profile.commuteMode;
@@ -1000,7 +1198,6 @@ function handleProfileChange() {
     ceilingHeightFt: document.getElementById('profile-ceiling').value,
     leakageId: document.getElementById('profile-leakage').value
   });
-  // Reset manual IAQ overrides when core room geometry changes so sizing stays aligned
   state.customAch = null;
   state.customCadr = null;
   saveJson(STORAGE_PROFILE_KEY, state.profile);
@@ -1038,12 +1235,86 @@ function initTabs() {
   });
 }
 
+function initNavSync() {
+  const links = Array.from(document.querySelectorAll('.header-nav .nav-link, .mobile-bottom-nav .dock-link'));
+  const setActiveHref = (href) => {
+    links.forEach((link) => {
+      link.classList.toggle('is-active', link.getAttribute('href') === href);
+    });
+  };
+  links.forEach((link) => {
+    link.addEventListener('click', () => setActiveHref(link.getAttribute('href')));
+  });
+}
+
 function initEvents() {
+  const searchInput = document.getElementById('city-search-input');
+  const clearSearchBtn = document.getElementById('btn-clear-search');
+
+  searchInput.addEventListener('input', () => {
+    const val = sanitizeText(searchInput.value, 80);
+    clearSearchBtn.hidden = val.length === 0;
+    clearTimeout(state.searchDebounceTimer);
+
+    if (val.length < 2) {
+      closeSuggestions();
+      return;
+    }
+
+    state.searchDebounceTimer = setTimeout(async () => {
+      const seq = ++state.searchSeq;
+      try {
+        const matches = await searchCitySuggestions(val);
+        if (seq !== state.searchSeq) return;
+        state.suggestions = matches;
+        state.highlightedSuggestion = -1;
+        renderSuggestions(matches, matches.length === 0 ? `No matching locations found for "${val}"` : null);
+      } catch {
+        if (seq === state.searchSeq) closeSuggestions();
+      }
+    }, 280);
+  });
+
+  searchInput.addEventListener('keydown', (e) => {
+    if (!state.suggestions.length) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      state.highlightedSuggestion = (state.highlightedSuggestion + 1) % state.suggestions.length;
+      renderSuggestions(state.suggestions);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      state.highlightedSuggestion = (state.highlightedSuggestion - 1 + state.suggestions.length) % state.suggestions.length;
+      renderSuggestions(state.suggestions);
+    } else if (e.key === 'Escape') {
+      closeSuggestions();
+    } else if (e.key === 'Enter' && state.highlightedSuggestion >= 0) {
+      e.preventDefault();
+      const chosen = state.suggestions[state.highlightedSuggestion];
+      searchInput.value = '';
+      clearSearchBtn.hidden = true;
+      closeSuggestions();
+      setActiveLocation(chosen);
+      loadLocationIntelligence();
+      showToast(`Loaded modeled atmospheric data for ${chosen.name}.`);
+    }
+  });
+
+  clearSearchBtn.addEventListener('click', () => {
+    searchInput.value = '';
+    clearSearchBtn.hidden = true;
+    closeSuggestions();
+    searchInput.focus();
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.search-shell')) closeSuggestions();
+  });
+
   document.getElementById('city-search-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const input = document.getElementById('city-search-input');
-    const query = sanitizeText(input.value, 80);
+    const query = sanitizeText(searchInput.value, 80);
     if (query.length < 2) return;
+    closeSuggestions();
 
     const btn = document.getElementById('btn-search-city');
     btn.disabled = true;
@@ -1053,8 +1324,9 @@ function initEvents() {
         showToast(`No geographic match found for "${query}". Try a city or district name.`);
         return;
       }
-      input.value = '';
-      state.location = match;
+      searchInput.value = '';
+      clearSearchBtn.hidden = true;
+      setActiveLocation(match);
       await loadLocationIntelligence();
       showToast(`Loaded modeled atmospheric data for ${match.name}.`);
     } catch {
@@ -1071,12 +1343,12 @@ function initEvents() {
     }
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        state.location = {
+        setActiveLocation({
           name: 'Detected Coordinates',
           region: 'Local Modeled Grid',
           lat: Number(pos.coords.latitude.toFixed(4)),
           lon: Number(pos.coords.longitude.toFixed(4))
-        };
+        }, { persist: false });
         loadLocationIntelligence();
         showToast('Loaded modeled telemetry for your current coordinates.');
       },
@@ -1091,17 +1363,55 @@ function initEvents() {
   });
 
   document.getElementById('btn-refresh').addEventListener('click', () => {
-    clearAirQualityCache();
-    loadLocationIntelligence();
+    loadLocationIntelligence(true);
     showToast('Refreshing live atmospheric telemetry.');
   });
 
   document.getElementById('btn-retry-fetch').addEventListener('click', () => {
-    clearAirQualityCache();
-    loadLocationIntelligence();
+    loadLocationIntelligence(true);
   });
 
-  // Historical range buttons (24h / 7d / 30d)
+  document.getElementById('btn-share-summary').addEventListener('click', async () => {
+    if (!state.intel) return;
+    const { location, cpcb, dispersion, metadata } = state.intel;
+    const summary = [
+      `VayuShield Environmental Summary — ${location.name}, ${location.region}`,
+      `CPCB-Derived Est. AQI: ${cpcb.aqi ?? 'N/A'} (${cpcb.band?.label || 'Incomplete'}) · Primary: ${cpcb.primaryPollutant?.name || 'N/A'}`,
+      dispersion.bestDaytimeWindow ? `Best Practical Daytime Window: ${dispersion.bestDaytimeWindow.label} (Projected PM2.5: ${dispersion.bestDaytimeWindow.avgPm25} µg/m³)` : '',
+      `Source: ${metadata.provider} (${metadata.gridResolution})`
+    ].filter(Boolean).join('\n');
+
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: `VayuShield — ${location.name}`, text: summary });
+      } else {
+        await navigator.clipboard.writeText(summary);
+        showToast('Copied non-sensitive air quality summary.');
+      }
+    } catch {
+      showToast('Share cancelled or clipboard unavailable.');
+    }
+  });
+
+  document.getElementById('btn-export-csv').addEventListener('click', () => {
+    if (!state.intel?.history?.points?.length) {
+      showToast('No historical telemetry available to export.');
+      return;
+    }
+    const csv = buildHistoricalCsv(state.intel);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const slug = state.intel.location.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 32) || 'location';
+    const link = createSafeElement(document, 'a', {
+      attrs: { href: url, download: `vayushield-${slug}-${state.pastDays}d.csv` }
+    });
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast(`Exported ${state.pastDays}d modeled PM2.5 dataset as CSV.`);
+  });
+
   const segBtns = Array.from(document.querySelectorAll('.seg-btn'));
   segBtns.forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1117,19 +1427,29 @@ function initEvents() {
     });
   });
 
-  // Profile fields
   [
     'profile-household', 'profile-commute', 'profile-km', 'profile-cooking',
     'profile-budget', 'profile-room', 'profile-ceiling', 'profile-leakage'
   ].forEach((id) => document.getElementById(id).addEventListener('change', handleProfileChange));
 
-  // IAQ interactive parameter overrides
+  document.getElementById('btn-reset-profile').addEventListener('click', () => {
+    state.profile = normalizeProfile();
+    state.customAch = null;
+    state.customCadr = null;
+    saveJson(STORAGE_PROFILE_KEY, state.profile);
+    syncProfileInputs();
+    document.getElementById('profile-status').textContent = 'Defaults restored';
+    renderDependentModules();
+    showToast('Household parameters reset to defaults.');
+  });
+
   document.getElementById('iaq-ach-input').addEventListener('change', (e) => {
     state.customAch = Number(e.target.value);
     state.customCadr = null;
     renderIndoorLab();
     renderRoutine();
   });
+
   document.getElementById('iaq-cadr-input').addEventListener('change', (e) => {
     state.customCadr = Number(e.target.value);
     renderIndoorLab();
@@ -1153,10 +1473,18 @@ function initEvents() {
 
   document.getElementById('coach-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    handleCoachSubmit(document.getElementById('coach-input').value);
+    const input = document.getElementById('coach-input');
+    const q = input.value;
+    input.value = '';
+    handleCoachSubmit(q);
   });
 
-  // Moderated Community Submission
+  document.getElementById('btn-clear-chat').addEventListener('click', () => {
+    state.coachHistory = [];
+    renderCoachThread();
+    showToast('Cleared AI Coach conversation thread.');
+  });
+
   document.getElementById('pledge-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const errorEl = document.getElementById('pledge-error');
@@ -1185,6 +1513,7 @@ function initEvents() {
 // Bootstrap
 syncProfileInputs();
 initTabs();
+initNavSync();
 initEvents();
 renderCityPresets();
 renderCoachTemplates();

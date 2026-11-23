@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="VayuShield — Scientific urban air quality intelligence, atmospheric dispersion forecasting, steady-state indoor filtration physics, and Gemini-powered household guidance." />
-  <title>VayuShield — Urban Air Quality Intelligence Platform</title>
+  <meta name="description" content="VayuShield — Apple-inspired environmental intelligence platform with Indian CPCB NAQI calculations, atmospheric dispersion forecasting, steady-state indoor filtration physics, and grounded Gemini AI." />
+  <title>VayuShield — Atmospheric &amp; Environmental Intelligence</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -15,32 +15,45 @@
 
   <header class="site-header" role="banner">
     <div class="container header-inner">
-      <div class="brand">
-        <a href="#main-content" class="brand-name">VayuShield</a>
-        <span class="brand-sep" aria-hidden="true">/</span>
-        <span class="brand-tag">Atmospheric Intelligence</span>
-      </div>
+      <a href="#main-content" class="brand" aria-label="VayuShield Home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <path d="M8.5 12.5c1.5-1.5 5.5-1.5 7 0"/>
+          </svg>
+        </span>
+        <span class="brand-text">
+          <span class="brand-name">VayuShield</span>
+          <span class="brand-tag">Environmental Intelligence</span>
+        </span>
+      </a>
 
       <nav class="header-nav" aria-label="Primary sections">
-        <a href="#live-intelligence" class="nav-link">Air Intelligence</a>
+        <a href="#live-intelligence" class="nav-link is-active">Air Intelligence</a>
         <a href="#dispersion-module" class="nav-link">Dispersion</a>
-        <a href="#profile-module" class="nav-link">Profile</a>
+        <a href="#profile-module" class="nav-link">Household</a>
         <a href="#workspace-module" class="nav-link">Tools &amp; AI Coach</a>
       </nav>
 
       <div class="header-actions">
+        <button id="btn-share-summary" type="button" class="btn btn-ghost btn-sm" aria-label="Copy non-sensitive air quality summary">
+          Share
+        </button>
         <button id="btn-gps" type="button" class="btn btn-secondary btn-sm" aria-label="Use browser geolocation for local air quality">
           Locate Me
         </button>
-        <button id="btn-refresh" type="button" class="btn btn-ghost btn-sm" aria-label="Refresh atmospheric telemetry">
-          Refresh
+        <button id="btn-refresh" type="button" class="btn btn-secondary btn-icon-circle" aria-label="Refresh atmospheric telemetry" title="Refresh live telemetry">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <polyline points="21 3 21 9 15 9"/>
+          </svg>
         </button>
       </div>
     </div>
   </header>
 
   <main id="main-content" class="container main-layout" role="main">
-    <!-- Explicit Telemetry Error Banner (Never Silently Substitutes Another City) -->
+    <!-- Explicit Telemetry Error / Stale Banner -->
     <div id="error-banner" class="error-banner" role="alert" hidden>
       <div>
         <strong id="error-title">Telemetry unavailable</strong>
@@ -51,38 +64,64 @@
 
     <!-- ==================== MODULE 1 & 2: FIRST-SCREEN INTELLIGENCE ==================== -->
     <section id="live-intelligence" class="intel-grid" aria-labelledby="city-heading">
-      <!-- Left: Live Air Quality Intelligence -->
+      <!-- Left: Atmospheric Intelligence Centerpiece -->
       <div id="telemetry-card" class="panel">
         <div class="panel-top">
           <div>
             <div class="provenance-row">
-              <span id="source-type-badge" class="badge badge-modeled">Modeled Grid · CAMS ~40 km</span>
+              <span id="source-type-badge" class="badge badge-modeled">Modeled · CAMS Grid</span>
               <span id="freshness-badge" class="badge badge-neutral">Connecting…</span>
               <span id="trend-badge" class="badge badge-neutral">Trend: —</span>
             </div>
-            <h1 id="city-heading" class="city-title">Delhi NCR, India</h1>
-            <p id="location-meta" class="mono-meta">28.6139° N, 77.2090° E · Local timezone pending</p>
+            <h1 id="city-heading" class="city-title">Loading Location…</h1>
+            <p id="location-meta" class="mono-meta">Resolving coordinates and local timezone…</p>
           </div>
 
-          <div id="aqi-box" class="aqi-box aqi-neutral" role="status" aria-live="polite">
-            <span id="aqi-standard-label" class="aqi-caption">CPCB-Derived Est.</span>
-            <strong id="aqi-value" class="aqi-number">—</strong>
-            <span id="aqi-band" class="aqi-band">Loading</span>
+          <!-- Segmented Circular Arc AQI Centerpiece -->
+          <div id="aqi-box" class="aqi-centerpiece aqi-neutral" role="status" aria-live="polite">
+            <div class="aqi-gauge-wrap">
+              <svg id="aqi-gauge-svg" class="aqi-gauge-svg" viewBox="0 0 120 82" aria-hidden="true">
+                <path d="M 14 72 A 46 46 0 0 1 106 72" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="8" stroke-linecap="round"/>
+                <path id="aqi-arc-fill" d="M 14 72 A 46 46 0 0 1 106 72" fill="none" stroke="#2DD4BF" stroke-width="8" stroke-linecap="round" stroke-dasharray="145" stroke-dashoffset="145"/>
+              </svg>
+              <strong id="aqi-value" class="aqi-gauge-value">—</strong>
+            </div>
+            <div>
+              <span id="aqi-standard-label" class="aqi-caption">CPCB-Derived Est.</span>
+              <div id="aqi-band" class="aqi-band">Loading</div>
+            </div>
           </div>
         </div>
 
-        <!-- Immediate Answer #5: What Should the User Do Now? -->
+        <!-- Immediate Action Callout -->
         <div id="immediate-action" class="action-callout action-neutral" aria-live="polite">
           <p id="action-headline" class="action-headline">Fetching live atmospheric telemetry…</p>
           <p id="action-detail" class="action-detail">Retrieving hourly pollutant concentrations and boundary-layer dispersion data from Open-Meteo.</p>
         </div>
 
-        <!-- Search & City Presets -->
-        <form id="city-search-form" class="search-bar" role="search" aria-label="Search air quality by city">
-          <label for="city-search-input" class="sr-only">Search city name</label>
-          <input id="city-search-input" type="search" maxlength="80" autocomplete="off" placeholder="Search any city worldwide (e.g., Delhi, Lucknow, Pune, London)" />
-          <button id="btn-search-city" type="submit" class="btn btn-primary">Inspect</button>
-        </form>
+        <!-- Debounced Global Search Combobox + Autocomplete Dropdown -->
+        <div class="search-shell">
+          <form id="city-search-form" class="search-bar" role="search" aria-label="Search air quality by city">
+            <label for="city-search-input" class="sr-only">Search city name</label>
+            <div class="search-input-wrap">
+              <input
+                id="city-search-input"
+                type="search"
+                maxlength="80"
+                autocomplete="off"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded="false"
+                aria-controls="search-suggestions"
+                placeholder="Search any city worldwide (e.g., Coimbatore, Delhi, London, Tokyo)"
+              />
+              <button id="btn-clear-search" type="button" class="search-clear-btn" aria-label="Clear city search" hidden>×</button>
+            </div>
+            <button id="btn-search-city" type="submit" class="btn btn-primary">Inspect</button>
+          </form>
+          <ul id="search-suggestions" class="search-suggestions" role="listbox" aria-label="Matching city locations" hidden></ul>
+        </div>
+
         <div id="city-presets" class="chip-row" role="group" aria-label="Curated urban monitoring presets"></div>
 
         <!-- Primary Pollutant + 6-Pollutant Breakdown -->
@@ -96,23 +135,28 @@
 
         <div id="pollutant-grid" class="pollutant-grid" aria-label="Pollutant concentrations and CPCB sub-indices"></div>
 
-        <!-- Historical Trend Controls (24h / 7d / 30d) -->
+        <!-- Historical Analytics (24h / 7d / 30d + CSV Export) -->
         <div class="history-block">
           <div class="subhead-row">
             <div>
               <h2 class="subhead">Historical PM2.5 Trend</h2>
               <p id="history-caption" class="muted-text">Modeled hourly PM2.5 concentration (µg/m³)</p>
             </div>
-            <div class="segmented" role="group" aria-label="Historical time range">
-              <button type="button" class="seg-btn is-active" data-days="1" aria-pressed="true">24h</button>
-              <button type="button" class="seg-btn" data-days="7" aria-pressed="false">7d</button>
-              <button type="button" class="seg-btn" data-days="30" aria-pressed="false">30d</button>
+            <div class="action-group">
+              <div class="segmented" role="group" aria-label="Historical time range">
+                <button type="button" class="seg-btn is-active" data-days="1" aria-pressed="true">24h</button>
+                <button type="button" class="seg-btn" data-days="7" aria-pressed="false">7d</button>
+                <button type="button" class="seg-btn" data-days="30" aria-pressed="false">30d</button>
+              </div>
+              <button id="btn-export-csv" type="button" class="btn btn-ghost btn-sm" aria-label="Download historical PM2.5 dataset as CSV">
+                Export CSV
+              </button>
             </div>
           </div>
           <div id="history-chart-wrap" class="chart-box" aria-label="Historical PM2.5 trend chart"></div>
         </div>
 
-        <!-- Progressive Disclosure: Provenance, CPCB Completeness & WHO / Mortality Caveats -->
+        <!-- Progressive Disclosure: Provenance, CPCB Methodology & Limitations -->
         <details class="methodology-drawer">
           <summary>Data provenance, CPCB methodology &amp; limitations</summary>
           <div class="drawer-body">
@@ -124,7 +168,7 @@
         </details>
       </div>
 
-      <!-- Right: Module 2 — Intelligent Atmospheric Dispersion Forecaster -->
+      <!-- Right: Module 2 — Atmospheric Dispersion Forecaster -->
       <aside id="dispersion-module" class="panel" aria-labelledby="dispersion-heading">
         <div class="panel-top-compact">
           <div>
@@ -135,7 +179,6 @@
           <span id="confidence-badge" class="badge badge-neutral">Confidence: —</span>
         </div>
 
-        <!-- Weather & Mixing Context Strip -->
         <div class="wx-strip" aria-label="Current surface meteorological conditions">
           <div class="wx-cell">
             <span class="wx-label">Temperature</span>
@@ -155,12 +198,11 @@
           </div>
         </div>
 
-        <!-- Key Dynamic Windows (Calculated from Real Hourly Data) -->
         <div class="window-cards">
           <div class="window-card window-good">
-            <span class="wx-label">Cleaner Forecasted Window</span>
+            <span class="wx-label">Best Practical Daytime Window</span>
             <strong id="best-window-val" class="window-val">—</strong>
-            <span id="best-window-note" class="muted-text">Calculated from hourly modeled PM2.5</span>
+            <span id="best-window-note" class="muted-text">Constrained to local sunrise–sunset</span>
           </div>
           <div class="window-card window-warn">
             <span class="wx-label">Peak Accumulation Risk</span>
@@ -169,7 +211,6 @@
           </div>
         </div>
 
-        <!-- 24-Hour Hourly PM2.5 + Dispersion SVG Chart -->
         <div id="dispersion-chart-wrap" class="chart-box" aria-label="24-hour hourly modeled PM2.5 forecast chart"></div>
         <div id="dispersion-timeline" class="dispersion-list" aria-label="Key forecast checkpoints"></div>
 
@@ -189,9 +230,12 @@
         <div>
           <p class="eyebrow">Personalised Household Intelligence</p>
           <h2 id="profile-heading" class="panel-title">Household, Commute &amp; Room Parameters</h2>
-          <p class="muted-text">Stored locally in your browser only. No account or residential address is collected.</p>
+          <p class="muted-text">Stored locally in your browser only. Drives your daily schedule, mass-balance CADR sizing, and commute carbon math.</p>
         </div>
-        <span id="profile-status" class="badge badge-teal" role="status" aria-live="polite">Profile synced</span>
+        <div class="action-group">
+          <span id="profile-status" class="badge badge-teal" role="status" aria-live="polite">Profile synced</span>
+          <button id="btn-reset-profile" type="button" class="btn btn-ghost btn-sm">Reset Defaults</button>
+        </div>
       </div>
 
       <div class="profile-grid">
@@ -285,14 +329,14 @@
         <div class="subhead-row">
           <div>
             <h2 class="panel-title">Conditional Daily Schedule</h2>
-            <p class="muted-text">Generated dynamically from current location telemetry, dispersion forecast, and household parameters.</p>
+            <p class="muted-text">Generated dynamically from current location telemetry, local daylight, and household parameters.</p>
           </div>
           <button id="btn-copy-routine" type="button" class="btn btn-secondary btn-sm">Copy Plan</button>
         </div>
         <ol id="routine-list" class="routine-grid"></ol>
       </div>
 
-      <!-- MODULE 5: Indoor Air Quality Lab (Mass-Balance Physics) -->
+      <!-- MODULE 5: Indoor Air Quality Lab -->
       <div id="panel-iaq" role="tabpanel" aria-labelledby="tab-iaq" class="panel tab-panel" hidden>
         <div class="subhead-row">
           <div>
@@ -342,7 +386,7 @@
         <div class="subhead-row">
           <div>
             <h2 class="panel-title">Parameterized Exposure &amp; Emissions Simulator</h2>
-            <p class="muted-text">Calculations scale directly to your commute distance, fuel type, and room physics while preventing pathway double-counting.</p>
+            <p class="muted-text">Hypothetical scenarios scaled directly to your commute distance, kitchen fuel, and room physics without double-counting.</p>
           </div>
         </div>
 
@@ -353,7 +397,7 @@
           </fieldset>
 
           <aside class="subpanel" aria-live="polite" aria-labelledby="impact-summary-heading">
-            <p class="eyebrow">Modeled Scenario Outcome</p>
+            <p class="eyebrow">Hypothetical Scenario Outcome</p>
             <h3 id="impact-summary-heading" class="subhead">Personal Exposure &amp; Carbon Impact</h3>
 
             <div class="kpi-grid-2">
@@ -370,7 +414,7 @@
               <div class="wx-cell">
                 <span class="wx-label">Direct Fuel/LPG Savings</span>
                 <strong id="imp-inr" class="kpi-big">₹0 / mo</strong>
-                <span class="muted-text">Direct household budget</span>
+                <span class="muted-text">Estimated household budget</span>
               </div>
               <div class="wx-cell">
                 <span class="wx-label">1,000-Household Scale</span>
@@ -392,32 +436,35 @@
         </div>
       </div>
 
-      <!-- MODULE 7: VayuShield AI Coach (Server-Side Gemini Proxy Only) -->
+      <!-- MODULE 7: VayuShield AI Coach (Multi-Turn Glass Thread) -->
       <div id="panel-coach" role="tabpanel" aria-labelledby="tab-coach" class="panel tab-panel" hidden>
         <div class="subhead-row">
           <div>
             <p class="eyebrow">Server-Side Google Gemini 2.5 Flash</p>
             <h2 class="panel-title">VayuShield AI Coach</h2>
-            <p class="muted-text">Grounded in your selected location telemetry, dispersion forecast, and room physics. Explicitly separates facts from assumptions.</p>
+            <p class="muted-text">Grounded in live location telemetry, dispersion windows, and room physics. Explicitly separates facts from assumptions.</p>
           </div>
-          <span id="coach-engine-badge" class="badge badge-teal">Ready</span>
+          <div class="action-group">
+            <span id="coach-engine-badge" class="badge badge-teal">Ready</span>
+            <button id="btn-clear-chat" type="button" class="btn btn-ghost btn-sm">Clear Thread</button>
+          </div>
         </div>
 
         <div id="coach-templates" class="chip-row" role="group" aria-label="Suggested scientific questions"></div>
 
         <form id="coach-form" class="coach-form">
           <label for="coach-input" class="field-label">Ask about current pollution, dispersion windows, or household protection</label>
-          <textarea id="coach-input" rows="3" maxlength="360" required placeholder="Example: Should we open bedroom windows this afternoon, and what CADR do we need for 220 sq.ft?"></textarea>
+          <textarea id="coach-input" rows="3" maxlength="360" required placeholder="Example: What is driving today's AQI, and when is the best practical daytime window for a walk?"></textarea>
           <div class="form-actions">
             <button id="btn-ask-coach" type="submit" class="btn btn-primary">Ask VayuShield AI</button>
             <span class="muted-text">API credentials remain strictly server-side.</span>
           </div>
         </form>
 
-        <div id="coach-output" class="coach-output" aria-live="polite"></div>
+        <div id="coach-output" class="coach-thread" aria-live="polite"></div>
       </div>
 
-      <!-- MODULE 8: Community Clean-Air Network (Moderated & Privacy-Safe) -->
+      <!-- MODULE 8: Community Clean-Air Network -->
       <div id="panel-community" role="tabpanel" aria-labelledby="tab-community" class="panel tab-panel" hidden>
         <div class="subhead-row">
           <div>
@@ -466,12 +513,32 @@
     </section>
   </main>
 
+  <!-- Mobile Bottom Glass Navigation Dock (Visible <= 768px) -->
+  <nav class="mobile-bottom-nav" aria-label="Mobile quick navigation">
+    <a href="#live-intelligence" class="dock-link is-active">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      <span>Air Intel</span>
+    </a>
+    <a href="#dispersion-module" class="dock-link">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9.59 4.59A2 2 0 1 1 11 8H2"/><path d="M12.59 19.41A2 2 0 1 0 14 16H2"/><path d="M17.73 7.73A2.5 2.5 0 1 1 19.5 12H2"/></svg>
+      <span>Forecast</span>
+    </a>
+    <a href="#profile-module" class="dock-link">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 10v10h14V10"/></svg>
+      <span>Home</span>
+    </a>
+    <a href="#workspace-module" class="dock-link">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span>AI &amp; Tools</span>
+    </a>
+  </nav>
+
   <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
 
   <footer class="site-footer" role="contentinfo">
     <div class="container footer-inner">
       <p><strong>VayuShield</strong> · Modeled atmospheric telemetry attributed to Copernicus CAMS &amp; Open-Meteo (CC-BY 4.0); CPCB NAQI breakpoint methodology (CUPS/82/2014-15).</p>
-      <p class="muted-text">Informational environmental intelligence only — consult a healthcare professional for medical emergencies.</p>
+      <p class="muted-text">Informational environmental intelligence only — consult a healthcare professional for medical advice.</p>
     </div>
   </footer>
 

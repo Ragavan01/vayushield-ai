@@ -1,8 +1,8 @@
 /**
- * @fileoverview VayuShield AI Coach client.
- * Communicates strictly with the server-side `/api/gemini` proxy (no browser API keys)
- * and provides a scientifically grounded fallback that explicitly separates facts,
- * recommendations, indoor calculations, and uncertainties.
+ * @fileoverview VayuShield AI Coach client (Project APEX v3.0).
+ * Communicates strictly with the server-side `/api/gemini` proxy (zero browser API keys)
+ * and provides a scientifically grounded deterministic fallback separating facts,
+ * recommendations, indoor calculations, and explicit uncertainties.
  */
 
 import { normalizeProfile } from '../core/impactModel.js';
@@ -13,23 +13,33 @@ const CLIENT_TIMEOUT_MS = 13_000;
 export const COACH_PROMPT_TEMPLATES = Object.freeze([
   Object.freeze({
     id: 'explain-aqi',
-    label: 'Explain current AQI & primary pollutant',
-    prompt: 'Explain our current AQI estimate, which pollutant is driving it, and how reliable this modeled reading is.'
+    label: 'Explain my current air quality',
+    prompt: 'Explain our current CPCB-derived AQI estimate, which pollutant is driving it, and how reliable this modeled reading is.'
   }),
   Object.freeze({
-    id: 'ventilation-timing',
-    label: 'Best ventilation & outdoor window',
-    prompt: 'Based on our 24-hour dispersion forecast, when is the cleanest window to ventilate or step outside?'
+    id: 'pollution-drivers',
+    label: 'What is causing today’s pollution?',
+    prompt: 'Based on our primary pollutant, boundary-layer height, and wind speed, what dispersion conditions are shaping today’s air quality?'
   }),
   Object.freeze({
-    id: 'indoor-cadr',
-    label: 'Explain my room CADR & budget options',
-    prompt: 'Explain the CADR calculation for my room size and compare zero-cost, DIY HEPA, and commercial purifier options.'
+    id: 'daytime-window',
+    label: 'Best practical outdoor window',
+    prompt: 'When is the best practical daytime window for outdoor activity or ventilation, and why should overnight lows not be used for exercise?'
   }),
   Object.freeze({
-    id: 'family-routine',
-    label: 'Tailored family smog protection plan',
-    prompt: 'Create a practical, evidence-based daily plan for our household profile and commute distance today.'
+    id: 'improve-indoor',
+    label: 'How can I improve indoor air?',
+    prompt: 'Give practical steps to improve indoor air quality for our household profile and kitchen fuel setup without relying on ozone ionizers.'
+  }),
+  Object.freeze({
+    id: 'room-cadr',
+    label: 'Explain my room CADR sizing',
+    prompt: 'Explain the mass-balance CADR calculation for my room dimensions and compare zero-cost, DIY HEPA, and commercial True H13 options.'
+  }),
+  Object.freeze({
+    id: 'compare-trend',
+    label: 'Compare today vs. recent trend',
+    prompt: 'Compare current PM2.5 against the 24-hour rolling average and next 6-hour forecast trend to tell me whether conditions are improving or worsening.'
   })
 ]);
 
@@ -47,32 +57,32 @@ export function buildGroundedFallback(question, intel, rawProfile, indoorEval) {
   const aqi = intel?.cpcb?.aqi;
   const band = intel?.cpcb?.band?.label || 'Unknown';
   const primary = intel?.cpcb?.primaryPollutant;
-  const pm25_24h = intel?.rollingAverages?.pm25_24h;
   const disp = intel?.dispersion;
   const cleanQ = sanitizeText(question, 240);
 
+  const dayWin = disp?.available ? disp.bestDaytimeWindow : null;
   const factsUsed = [
     `${city} (${intel?.location?.lat ?? '—'}°, ${intel?.location?.lon ?? '—'}°): ${intel?.metadata?.sourceType || 'Modeled Atmospheric Grid'} (${intel?.metadata?.gridResolution || '~40 km'}).`,
     aqi !== null && aqi !== undefined
-      ? `CPCB-derived estimate: AQI ${aqi} (${band}); Primary pollutant: ${primary ? `${primary.name} (${primary.concentration} ${primary.unit},${primary.averaging})` : 'N/A'}.`
+      ? `CPCB-derived estimate: AQI ${aqi} (${band}); Primary pollutant:${primary ? `${primary.name} (${primary.concentration} ${primary.unit}, ${primary.averaging})` : 'N/A'}.`
       : 'Pollutant data was insufficient to compute a complete CPCB-derived AQI.',
-    disp?.available && disp.bestOutdoorWindow
-      ? `24-hr modeled PM2.5 trend: ${disp.trend}; lowest modeled 3-hr window is ${disp.bestOutdoorWindow.label} (~${disp.bestOutdoorWindow.avgPm25} µg/m³).`
+    dayWin
+      ? `Next 6-hr PM2.5 trend: ${disp.trend} (${disp.trendDeltaPct >= 0 ? '+' : ''}${disp.trendDeltaPct}%); best practical daytime window is ${dayWin.label} (Projected PM2.5:${dayWin.avgPm25} µg/m³).`
       : 'Hourly atmospheric dispersion forecast is unavailable for this request.'
   ];
 
   const recommendations = [
     disp?.available && disp.bestVentilationWindow
       ? disp.bestVentilationWindow.guidance
-      : 'Keep windows closed during stagnant low-wind periods and flush briefly only when outdoor haze improves.',
-    `For your ${profile.dailyCommuteKm} km ${profile.commuteMode} commute, ${aqi > 150 ? 'wear a tight-seal N95/FFP2 respirator along traffic corridors and avoid peak exhaust queues.' : 'standard precautions apply; monitor evening wind drops.'}`,
+      : 'Keep exterior openings closed during stagnant low-wind periods and flush briefly during cleaner daylight hours.',
+    `For your ${profile.dailyCommuteKm} km ${profile.commuteMode} commute,${aqi > 150 ? 'wear a tight-seal N95/FFP2 respirator along traffic corridors and avoid peak exhaust queues.' : 'standard precautions apply; watch for evening boundary-layer compression.'}`,
     profile.cookingFuel === 'induction'
-      ? 'Continue electric/induction cooking with pan lids and kitchen exhaust during frying.'
+      ? 'Continue electric/induction cooking with pan lids and kitchen exhaust during high-heat frying.'
       : 'Run outward kitchen exhaust during LPG/solid-fuel cooking and shift boiling/simmering to electric appliances to reduce indoor NO₂ spikes.'
   ];
 
   const indoorGuidance = indoorEval
-    ? `For your ${indoorEval.dimensions.floorAreaSqFt} sq.ft room (${indoorEval.dimensions.volumeM3} m³ volume), target CADR ≥ ${indoorEval.sizing.recommendedCadrM3h} m³/h (${indoorEval.sizing.recommendedAch} ACH). Steady-state mass-balance modeling estimates indoor PM2.5 dropping from ~${indoorEval.outcomes.unfilteredIndoorPm25} to ~${indoorEval.outcomes.filteredIndoorPm25} µg/m³ (range ${indoorEval.outcomes.filteredRange[0]}–${indoorEval.outcomes.filteredRange[1]} µg/m³). Note: True HEPA captures particles only, not NO₂/VOCs; avoid ozone ionizers.`
+    ? `For your ${indoorEval.dimensions.floorAreaSqFt} sq.ft room (${indoorEval.dimensions.volumeM3} m³ volume), target CADR ≥ ${indoorEval.sizing.recommendedCadrM3h} m³/h (${indoorEval.sizing.recommendedAch} ACH). Steady-state mass-balance modeling estimates indoor PM2.5 dropping from ${indoorEval.outcomes.unfilteredIndoorPm25} to${indoorEval.outcomes.filteredIndoorPm25} µg/m³ (range ${indoorEval.outcomes.filteredRange[0]}–${indoorEval.outcomes.filteredRange[1]} µg/m³). Note: True HEPA captures particles only, not NO₂/VOCs; avoid ozone ionizers.`
     : 'Size mechanical True HEPA filtration to 4–5 air changes per hour and keep ozone/ionizer modes off.';
 
   const assumptionsAndLimits = [
@@ -85,7 +95,7 @@ export function buildGroundedFallback(question, intel, rawProfile, indoorEval) {
     engine: 'VayuShield Grounded Engine (Server Proxy Unavailable)',
     isFallback: true,
     headline: aqi !== null && aqi !== undefined
-      ? `${city}: ${band} Modeled Air (Est. AQI ${aqi}) — Grounded Household Plan`
+      ? `${city}:${band} Modeled Air (Est. AQI ${aqi}) — Grounded Household Plan`
       : `${city}: Grounded Air Quality Guidance`,
     factsUsed,
     recommendations,
@@ -131,7 +141,7 @@ export async function askVayuShieldCoach(params, options = {}) {
         pm10: intel.rollingAverages.pm10_24h ?? intel.current.pm10 ?? 0,
         no2: intel.rollingAverages.no2_24h ?? intel.current.no2 ?? 0,
         trend: intel.dispersion?.trend || 'unavailable',
-        bestWindow: intel.dispersion?.bestOutdoorWindow?.label || 'Unavailable',
+        bestWindow: intel.dispersion?.bestDaytimeWindow?.label || 'Unavailable',
         householdProfile: profile.householdProfile,
         commuteMode: profile.commuteMode,
         dailyCommuteKm: profile.dailyCommuteKm,

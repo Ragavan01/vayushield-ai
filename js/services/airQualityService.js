@@ -90,6 +90,57 @@ export async function geocodeCity(query, options = {}) {
   };
 }
 
+/**
+ * Fetches up to 5 geocoded city suggestions for the debounced autocomplete combobox.
+ * @param {string} query
+ * @param {{ fetchImpl?: typeof fetch }} [options]
+ */
+export async function searchCitySuggestions(query, options = {}) {
+  const clean = sanitizeText(query, 80);
+  if (clean.length < 2) return [];
+
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(clean)}&count=5&language=en&format=json`;
+  const json = await fetchJsonWithRetry(url, fetchImpl, 0);
+  const rows = Array.isArray(json?.results) ? json.results : [];
+
+  return rows.map((hit) => ({
+    name: sanitizeText(hit.name, 60) || clean,
+    region: sanitizeText([hit.admin1, hit.country].filter(Boolean).join(', '), 80) || 'Unknown Region',
+    lat: Number(clampNumber(hit.latitude, -90, 90, 0).toFixed(4)),
+    lon: Number(clampNumber(hit.longitude, -180, 180, 0).toFixed(4))
+  }));
+}
+
+/**
+ * Generates an RFC-4180 CSV string with formula-injection protection for the active historical series.
+ * @param {any} intel
+ * @returns {string}
+ */
+export function buildHistoricalCsv(intel) {
+  const safeCell = (val) => {
+    const str = val === null || val === undefined ? '' : String(val);
+    const neutral = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+    return `"${neutral.replace(/"/g, '""')}"`;
+  };
+
+  const loc = intel?.location?.name || 'Location';
+  const source = intel?.metadata?.provider || 'Open-Meteo / CAMS';
+  const points = Array.isArray(intel?.history?.points) ? intel.history.points : [];
+
+  const header = ['timestamp_local', 'location', 'pm25_ug_m3', 'pm10_ug_m3', 'source_type', 'provider'].join(',');
+  const lines = points.map((pt) => [
+    safeCell(pt.time),
+    safeCell(loc),
+    pt.pm25 === null || pt.pm25 === undefined ? '' : pt.pm25,
+    pt.pm10 === null || pt.pm10 === undefined ? '' : pt.pm10,
+    safeCell('modeled_atmospheric_grid'),
+    safeCell(source)
+  ].join(','));
+
+  return [header, ...lines].join('\n');
+}
+
 function findCurrentHourIndex(times, currentIso) {
   if (!Array.isArray(times) || times.length === 0) return 0;
   if (currentIso) {
