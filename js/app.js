@@ -5,7 +5,7 @@
  * - Interactive SVG Room Mass-Balance Blueprint & CADR/ACH Performance Curve
  * - Explicit reference-scenario notices when live PM2.5 is missing (SCI-06)
  * - Honest separation between Illustrative Examples and Local Device Entries (SCI-07)
- * - IntersectionObserver nav-bar & mobile dock synchronization
+ * - On-demand AI Coach invocation (does not burn Gemini API quota on passive page loads)
  */
 
 import { compareToWhoGuideline } from './core/cpcbAqi.js';
@@ -313,7 +313,6 @@ function renderLiveIntelligence() {
     whoBadge.className = 'badge badge-neutral';
   }
 
-  // All 8 CPCB Pollutants (6 modeled by CAMS + NH3 & Pb explicitly marked unavailable)
   const grid = document.getElementById('pollutant-grid');
   clearNode(grid);
 
@@ -365,7 +364,6 @@ function renderLiveIntelligence() {
     grid.appendChild(cell);
   }
 
-  // Provenance Drawer
   const yestNote = typeof rollingAverages.yesterdayPm25_24h === 'number'
     ? ` Prior 24h (Yesterday) PM2.5 mean: ${rollingAverages.yesterdayPm25_24h} µg/m³.`
     : '';
@@ -590,7 +588,6 @@ function renderDispersionModule() {
     'aria-label': `Next 24-hour modeled hourly PM2.5 forecast. Best daytime window ${dayWin?.label}, peak window ${peakWin?.label}.`
   });
 
-  // CPCB 60 reference line across 24h forecast
   const cpcbY = padT + plotH - (Math.min(60, maxPm) / maxPm) * plotH;
   svg.appendChild(createSvg('line', {
     x1: padL, y1: cpcbY.toFixed(1), x2: width - padR, y2: cpcbY.toFixed(1),
@@ -688,7 +685,6 @@ function renderRoomBlueprint(evalResult) {
     'aria-label': `Room mass balance diagram: ${dimensions.floorAreaSqFt} square feet, ${dimensions.volumeM3} cubic meters, outdoor ${assumptions.outdoorPm25}, filtered indoor ${outcomes.filteredIndoorPm25} micrograms per cubic meter.`
   });
 
-  // Outdoor zone indicator
   svg.appendChild(createSvg('rect', { x: '6', y: '22', width: '78', height: '116', rx: '8', fill: 'rgba(251,191,36,0.1)', stroke: 'rgba(251,191,36,0.45)', 'stroke-dasharray': '4 3' }));
   const outLbl = createSvg('text', { x: '45', y: '56', 'text-anchor': 'middle', fill: '#FDE68A', 'font-size': '9.5' });
   outLbl.textContent = 'OUTDOOR';
@@ -703,17 +699,14 @@ function renderRoomBlueprint(evalResult) {
   leakTxt.textContent = `Inf. ${assumptions.infiltrationAch} ACH`;
   svg.appendChild(leakTxt);
 
-  // Infiltration arrow into room
   svg.appendChild(createSvg('line', { x1: '86', y1: '80', x2: '108', y2: '80', stroke: '#FBBF24', 'stroke-width': '2' }));
   svg.appendChild(createSvg('polygon', { points: '108,76 116,80 108,84', fill: '#FBBF24' }));
 
-  // Room enclosure
   svg.appendChild(createSvg('rect', { x: '118', y: '20', width: '234', height: '120', rx: '12', fill: 'rgba(45,212,191,0.07)', stroke: 'rgba(45,212,191,0.55)', 'stroke-width': '1.5' }));
   const dimTxt = createSvg('text', { x: '235', y: '37', 'text-anchor': 'middle', fill: '#93A4BA', 'font-size': '9.5' });
   dimTxt.textContent = `${dimensions.floorAreaSqFt} sq.ft × ${dimensions.ceilingHeightFt} ft · Vol ${dimensions.volumeM3} m³`;
   svg.appendChild(dimTxt);
 
-  // Steady-state indoor readout
   const inVal = createSvg('text', { x: '198', y: '78', 'text-anchor': 'middle', fill: '#2DD4BF', 'font-size': '20', 'font-weight': '700' });
   inVal.textContent = `${outcomes.filteredIndoorPm25} µg/m³`;
   svg.appendChild(inVal);
@@ -721,7 +714,6 @@ function renderRoomBlueprint(evalResult) {
   inSub.textContent = `Steady Indoor (-${outcomes.reductionPct}% vs ${outcomes.unfilteredIndoorPm25})`;
   svg.appendChild(inSub);
 
-  // Purifier unit block inside room
   svg.appendChild(createSvg('rect', { x: '278', y: '56', width: '62', height: '72', rx: '8', fill: 'rgba(56,189,248,0.16)', stroke: '#38BDF8', 'stroke-width': '1.2' }));
   const purLbl = createSvg('text', { x: '309', y: '76', 'text-anchor': 'middle', fill: '#7DD3FC', 'font-size': '8.5', 'font-weight': '700' });
   purLbl.textContent = assumptions.inputMode === 'airflow' ? 'DIY FAN' : 'HEPA';
@@ -736,7 +728,6 @@ function renderRoomBlueprint(evalResult) {
   purAch.textContent = `${sizing.effectiveFiltrationAch} eACH`;
   svg.appendChild(purAch);
 
-  // Footer note
   const foot = createSvg('text', { x: '235', y: '156', 'text-anchor': 'middle', fill: '#93A4BA', 'font-size': '8.8' });
   foot.textContent = `Sources: ${assumptions.indoorSourceLabel} · Dep. ${assumptions.depositionAch}/h`;
   svg.appendChild(foot);
@@ -769,7 +760,6 @@ function renderCadrCurveChart(evalResult) {
     'aria-label': `CADR performance curve from 0 to ${maxCadr} cubic meters per hour. Active effective CADR ${evalResult.sizing.effectiveCadrM3h} yields ${evalResult.outcomes.filteredIndoorPm25} micrograms per cubic meter.`
   });
 
-  // Reference lines: WHO 15 & CPCB 60
   for (const th of [{ val: 15, color: '#34D399', lbl: 'WHO 15' }, { val: 60, color: '#FBBF24', lbl: 'CPCB 60' }]) {
     if (th.val <= maxPm) {
       const ty = padT + plotH - (th.val / maxPm) * plotH;
@@ -805,7 +795,6 @@ function renderCadrCurveChart(evalResult) {
     svg.appendChild(dot);
   }
 
-  // Highlight active operating point
   const activeX = padL + (Math.min(maxCadr, evalResult.sizing.effectiveCadrM3h) / maxCadr) * plotW;
   const activeY = padT + plotH - (Math.min(maxPm, evalResult.outcomes.filteredIndoorPm25) / maxPm) * plotH;
   const activeDot = createSvg('circle', { cx: activeX.toFixed(1), cy: activeY.toFixed(1), r: '5', fill: '#2DD4BF', stroke: '#050810', 'stroke-width': '1.5' });
@@ -1047,23 +1036,6 @@ function renderCoachTemplates() {
 function formatCoachPlainText(res) {
   return [
     res.headline,
-    '',
-    'Telemetry & Facts Used:',
-    ...(res.factsUsed || []).map((f) => `- ${f}`),
-    '',
-    'Recommendations:',
-    ...(res.recommendations || []).map((r) => `- ${r}`),
-    '',
-    `Indoor Guidance: ${res.indoorGuidance || ''}`,
-    '',
-    'Assumptions & Limits:',
-    ...(res.assumptionsAndLimits || []).map((a) => `- ${a}`)
-  ].join('\n');
-}
-
-function formatCoachPlainText(res) {
-  return [
-    res.headline,
     res.directAnswer || res.indoorGuidance || '',
     '',
     ...(res.recommendations || []).length
@@ -1085,7 +1057,7 @@ function renderCoachThread() {
   if (state.coachHistory.length === 0) {
     out.appendChild(createSafeElement(document, 'p', {
       className: 'muted-text',
-      text: 'Select a suggested question above or ask anything about current air quality, yesterday’s comparison, dispersion windows, or indoor filtration.'
+      text: `Ready to analyze live ${state.location.name} telemetry. Select a suggested question above or type your own question below.`
     }));
     return;
   }
@@ -1387,7 +1359,15 @@ async function loadLocationIntelligence(forceRefresh = false) {
     renderLiveIntelligence();
     renderDispersionModule();
     renderDependentModules();
-    handleCoachSubmit(COACH_PROMPT_TEMPLATES[0].prompt, { resetThread: true });
+
+    // Reset AI Coach thread cleanly for the new city without burning API quota until the user asks
+    state.coachHistory = [];
+    const coachBadge = document.getElementById('coach-engine-badge');
+    if (coachBadge) {
+      coachBadge.textContent = 'Ready';
+      coachBadge.className = 'badge badge-teal';
+    }
+    renderCoachThread();
   } catch (err) {
     if (token !== state.fetchToken) return;
     showErrorBanner(

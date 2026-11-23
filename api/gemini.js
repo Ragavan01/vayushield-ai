@@ -1,17 +1,20 @@
 /**
- * @fileoverview Hardened Vercel Serverless Proxy for Google Gemini 2.5 Flash.
- * Fixes:
- * - Sets thinkingConfig: { thinkingBudget: 0 } + maxOutputTokens: 1400 so gemini-2.5-flash
- *   never exhausts tokens on hidden thoughts and truncates JSON output.
- * - Automatic model fallback chain (gemini-2.5-flash -> gemini-2.0-flash) on transient errors.
- * - Question-specific JSON schema (directAnswer, actionableSteps, dataBasis, caveat)
- *   so every prompt receives a distinct, grounded answer rather than boilerplate.
- * - Never coerces missing/null telemetry into zero.
+ * @fileoverview Hardened Vercel Serverless Proxy for Google Gemini.
+ * - Strictly server-side GEMINI_API_KEY only
+ * - Safe JSON body parsing for Vercel Node runtime
+ * - Multi-model resilience (gemini-2.5-flash -> gemini-2.0-flash -> gemini-2.5-flash-lite)
+ * - Logs sanitized upstream status/reason (never API keys) for Vercel Observability
  */
 
 import { clampNumber, sanitizeText } from '../js/core/security.js';
 
-const GEMINI_MODELS = Object.freeze(['gemini-2.5-flash', 'gemini-2.0-flash']);
+const GEMINI_ATTEMPTS = Object.freeze([
+  Object.freeze({ model: 'gemini-2.5-flash', label: 'Google Gemini 2.5 Flash', disableThinking: true }),
+  Object.freeze({ model: 'gemini-2.5-flash', label: 'Google Gemini 2.5 Flash', disableThinking: false }),
+  Object.freeze({ model: 'gemini-2.0-flash', label: 'Google Gemini 2.0 Flash', disableThinking: false }),
+  Object.freeze({ model: 'gemini-2.5-flash-lite', label: 'Google Gemini 2.5 Flash-Lite', disableThinking: false })
+]);
+
 const MAX_BODY_BYTES = 18_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 15;
@@ -114,6 +117,20 @@ export function parseStructuredCoachResponse(rawText) {
   };
 }
 
+function parseRequestBody(rawBody) {
+  if (!rawBody) return null;
+  if (typeof rawBody === 'object') return rawBody;
+  if (typeof rawBody === 'string') {
+    try {
+      const parsed = JSON.parse(rawBody);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export function createGeminiHandler(deps = {}) {
   const fetchImpl = deps.fetchImpl || globalThis.fetch;
   const env = deps.env || process.env;
@@ -132,7 +149,7 @@ export function createGeminiHandler(deps = {}) {
       return res.status(429).json({ error: 'Rate limit exceeded. Please wait 60 seconds.', diagnosticCode: 'RATE_LIMITED' });
     }
 
-    const body = req.body && typeof req.body === 'object' ? req.body : null;
+    const body = parseRequestBody(req.body);
     if (!body) {
       return res.status(400).json({ error: 'Invalid JSON request body.', diagnosticCode: 'BAD_REQUEST' });
     }
@@ -187,18 +204,18 @@ export function createGeminiHandler(deps = {}) {
     const promptText = buildScientificPrompt(ctx);
     let lastDiagnostic = 'UPSTREAM_ERROR';
 
-    for (const modelName of GEMINI_MODELS) {
+    for (const attempt of GEMINI_ATTEMPTS) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
       try {
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${attempt.model}:generateContent`;
         const generationConfig = {
           temperature: 0.25,
           maxOutputTokens: 1400,
           responseMimeType: 'application/json'
         };
-        if (modelName.startsWith('gemini-2.5')) {
+        if (attempt.disableThinking) {
           generationConfig.thinkingConfig = { thinkingBudget: 0 };
         }
 
@@ -216,11 +233,16 @@ export function createGeminiHandler(deps = {}) {
         });
 
         if (!upstream.ok) {
-          lastDiagnostic = `UPSTREAM_HTTP_${upstream.status}`;
-          if ([404, 429, 500, 502, 503].includes(upstream.status)) {
-            continue;
+          const errPayload = await upstream.json?.().catch(() => null);
+          const apiReason = sanitizeText(errPayload?.error?.status || errPayload?.error?.message || '', 80);
+          lastDiagnostic = `HTTP_${upstream.status}${apiReason ? `_${apiReason.replace(/[^A-Z0-9_]/gi, '_').slice(0, 24)}` : ''}`;
+          console.error(`[VayuShield Gemini Proxy] model=${attempt.model} status=${upstream.status} reason=${apiReason}`);
+          // Stop immediately only on invalid/unauthorized key; otherwise try next fallback model/config
+          if (upstream.status === 401 || upstream.status === 403 || /API_KEY_INVALID/i.test(apiReason)) {
+            lastDiagnostic = 'INVALID_GEMINI_API_KEY';
+            break;
           }
-          break;
+          continue;
         }
 
         const data = await upstream.json();
@@ -228,11 +250,12 @@ export function createGeminiHandler(deps = {}) {
         const structured = parseStructuredCoachResponse(text);
 
         return res.status(200).json({
-          engine: `${modelName === 'gemini-2.5-flash' ? 'Google Gemini 2.5 Flash' : 'Google Gemini 2.0 Flash'} (Server-Side Proxy)`,
+          engine: `${attempt.label} (Server-Side Proxy)`,
           ...structured
         });
       } catch (err) {
         lastDiagnostic = err?.name === 'AbortError' ? 'UPSTREAM_TIMEOUT' : 'RESPONSE_PARSE_ERROR';
+        console.error(`[VayuShield Gemini Proxy] model=${attempt.model} exception=${lastDiagnostic}`);
       } finally {
         clearTimeout(timeoutId);
       }

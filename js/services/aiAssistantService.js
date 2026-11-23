@@ -81,9 +81,10 @@ export function buildGroundedFallback(question, intel, rawProfile, indoorEval, d
   const yestPm25 = intel?.rollingAverages?.yesterdayPm25_24h ?? null;
   const disp = intel?.dispersion;
   const firstHr = disp?.hourly?.[0];
-  const dayWin = disp?.available ? disp.bestDaytimeWindow : null;
-  const lowWin = disp?.available ? disp.lowestPollutionWindow : null;
-  const peakWin = disp?.available ? disp.peakAccumulationWindow : null;
+  const dispAvailable = Boolean(disp && disp.available !== false);
+  const dayWin = dispAvailable ? (disp.bestDaytimeWindow || disp.bestOutdoorWindow || null) : null;
+  const lowWin = dispAvailable ? (disp.lowestPollutionWindow || null) : null;
+  const peakWin = dispAvailable ? (disp.peakAccumulationWindow || null) : null;
   const cleanQ = sanitizeText(question, 240);
   const intent = detectQuestionIntent(cleanQ);
 
@@ -146,8 +147,14 @@ export function buildGroundedFallback(question, intel, rawProfile, indoorEval, d
     const overnightExplain = lowWin && !lowWin.isDaytime
       ? ` While the absolute lowest concentration occurs overnight (${lowWin.label} at ${lowWin.avgPm25} µg/m³), VayuShield excludes overnight hours from exercise recommendations due to darkness, safety, and sleep recovery.`
       : '';
+    const daylightSpan = disp?.daylight?.sunriseLabel && disp?.daylight?.sunsetLabel
+      ? ` between sunrise (${disp.daylight.sunriseLabel}) and sunset (${disp.daylight.sunsetLabel})`
+      : '';
+    const pmDetail = typeof dayWin?.avgPm25 === 'number'
+      ? `, with projected PM2.5 of ${dayWin.avgPm25} µg/m³${dayWin.deltaText ? ` (${dayWin.deltaText})` : ''}`
+      : '';
     const directAnswer = dayWin
-      ? `For ${city}, the best practical daytime window between sunrise (${disp.daylight.sunriseLabel}) and sunset (${disp.daylight.sunsetLabel}) is ${dayWin.label}, with projected PM2.5 of ${dayWin.avgPm25} µg/m³ (${dayWin.deltaText}).${overnightExplain}`
+      ? `For ${city}, the best practical daytime window${daylightSpan} is ${dayWin.label}${pmDetail}.${overnightExplain}`
       : `Daytime forecast windows are currently unavailable for ${city}; check the 24-hour dispersion bar chart once telemetry refreshes.`;
 
     return {
@@ -162,7 +169,9 @@ export function buildGroundedFallback(question, intel, rawProfile, indoorEval, d
           : `Use ${dayWin?.label || 'midday hours'} for light-to-moderate outdoor activity away from heavy traffic.`
       ],
       factsUsed: [
-        dayWin ? `Daytime window ${dayWin.label}: Projected ${dayWin.avgPm25} µg/m³ · Ventilation Coeff. ${dayWin.avgVc ?? 'N/A'} m²/s` : 'Daytime window pending',
+        dayWin
+          ? `Daytime window ${dayWin.label}${typeof dayWin.avgPm25 === 'number' ? `: Projected ${dayWin.avgPm25} µg/m³` : ''}${dayWin.avgVc ? ` · Ventilation Coeff. ${dayWin.avgVc} m²/s` : ''}`
+          : 'Daytime window pending',
         peakWin ? `Peak accumulation risk: ${peakWin.label} (${peakWin.avgPm25} µg/m³)` : 'Peak window pending'
       ],
       indoorGuidance: directAnswer,
