@@ -1,10 +1,7 @@
 /**
  * @fileoverview Standardized environmental data integrity layer.
- * Enforces:
- * - Physical non-negativity on all pollutant concentrations (FIX 01 & FIX 07)
- * - Canonical EnvironmentalReading records with full provenance metadata
- * - Measurement-timestamp vs. retrieval-timestamp freshness classification
- * - Clean separation between projected concentrations and signed deltas
+ * Enforces non-negative pollutant concentrations, canonical EnvironmentalReading objects,
+ * and timezone-exact freshness via provider utc_offset_seconds (IST, GMT, EST, JST).
  */
 
 export const FRESHNESS_STATES = Object.freeze({
@@ -15,13 +12,6 @@ export const FRESHNESS_STATES = Object.freeze({
   UNAVAILABLE: 'Unavailable'
 });
 
-/**
- * Sanitizes a pollutant concentration so physically invalid negative or non-finite values
- * can never enter calculations or UI rendering.
- * @param {unknown} raw
- * @param {number} [decimals=1]
- * @returns {number | null}
- */
 export function sanitizeConcentration(raw, decimals = 1) {
   if (raw === null || raw === undefined || raw === '') return null;
   const num = Number(raw);
@@ -29,13 +19,33 @@ export function sanitizeConcentration(raw, decimals = 1) {
   return Number(num.toFixed(decimals));
 }
 
-/**
- * Formats a strictly non-negative projected concentration paired with a separate signed change
- * against a reference baseline (prevents visually ambiguous "~18.6" or invalid negatives).
- * @param {number | null} projected
- * @param {number | null} reference
- * @param {string} [unit='µg/m³']
- */
+export function parseLocationTimestampUtc(isoString, utcOffsetSeconds = null) {
+  if (!isoString || typeof isoString !== 'string') return null;
+  const trimmed = isoString.trim();
+
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)) {
+    const ms = Date.parse(trimmed);
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  const match = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (match && typeof utcOffsetSeconds === 'number' && Number.isFinite(utcOffsetSeconds)) {
+    const [, y, m, d, hh, mm, ss] = match;
+    const wallUtcMs = Date.UTC(
+      Number(y),
+      Number(m) - 1,
+      Number(d),
+      Number(hh),
+      Number(mm),
+      Number(ss || 0)
+    );
+    return wallUtcMs - utcOffsetSeconds * 1000;
+  }
+
+  const fallbackMs = Date.parse(trimmed);
+  return Number.isFinite(fallbackMs) ? fallbackMs : null;
+}
+
 export function formatProjectedAndDelta(projected, reference, unit = 'µg/m³') {
   const safeProj = sanitizeConcentration(projected, 1);
   const safeRef = sanitizeConcentration(reference, 1);
@@ -67,18 +77,6 @@ export function formatProjectedAndDelta(projected, reference, unit = 'µg/m³') 
   };
 }
 
-/**
- * Evaluates data freshness from actual provider measurement/valid timestamp vs. retrieval time.
- * Never assumes API retrieval time equals observation/model valid time.
- *
- * Expected cadences:
- * - modeled (hourly CAMS/ECMWF valid hour): <= 90m Fresh, <= 3h Recent, <= 6h Delayed, > 6h Stale
- * - station (hourly CAAQMS): <= 75m Fresh, <= 2h Recent, <= 4h Delayed, > 4h Stale
- *
- * @param {string | null | undefined} measurementIso
- * @param {number} [nowMs=Date.now()]
- * @param {{ sourceType?: 'station' | 'modeled', isStaleFallback?: boolean }} [options]
- */
 export function evaluateDataFreshness(measurementIso, nowMs = Date.now(), options = {}) {
   if (options.isStaleFallback) {
     return {
@@ -89,23 +87,13 @@ export function evaluateDataFreshness(measurementIso, nowMs = Date.now(), option
     };
   }
 
-  if (!measurementIso || typeof measurementIso !== 'string') {
+  const parsedMs = parseLocationTimestampUtc(measurementIso, options.utcOffsetSeconds);
+  if (parsedMs === null) {
     return {
       state: FRESHNESS_STATES.UNAVAILABLE,
       ageMinutes: null,
       badgeTone: 'neutral',
       label: 'Timestamp unavailable'
-    };
-  }
-
-  // Parse ISO timestamp; local-timezone Open-Meteo strings without offset default to local wall time
-  const parsedMs = Date.parse(measurementIso);
-  if (!Number.isFinite(parsedMs)) {
-    return {
-      state: FRESHNESS_STATES.UNAVAILABLE,
-      ageMinutes: null,
-      badgeTone: 'neutral',
-      label: 'Unverified timestamp'
     };
   }
 
@@ -127,27 +115,11 @@ export function evaluateDataFreshness(measurementIso, nowMs = Date.now(), option
   return { state: FRESHNESS_STATES.STALE, ageMinutes, badgeTone: 'alert', label: 'Stale' };
 }
 
-/**
- * Constructs a standardized EnvironmentalReading object.
- * @param {{
- *   pollutant: string,
- *   value: unknown,
- *   unit: string,
- *   source: string,
- *   sourceType: 'station' | 'modeled',
- *   location: { name: string, lat: number, lon: number },
- *   measurementTime: string | null,
- *   retrievalTime: string,
- *   averagingPeriod: string,
- *   spatialResolution: string,
- *   completenessPct?: number
- * }} input
- */
 export function createEnvironmentalReading(input) {
   const safeValue = sanitizeConcentration(input.value, input.unit === 'mg/m³' ? 3 : 1);
   const qualityStatus = safeValue === null
     ? 'unavailable'
-    : typeof input.completenessPct === 'number' && input.completenessPct < 75
+    : typeof input.completenessPct === 'number' && input.completenessPct < 67
       ? 'incomplete'
       : 'valid';
 

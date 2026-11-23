@@ -1,12 +1,8 @@
 /**
  * @fileoverview Single-zone steady-state indoor PM2.5 mass-balance calculator
- * grounded in US EPA / ASHRAE indoor particulate physics.
- *
- * Formula:
- *   C_in = (P * lambda_inf * C_out + E / V) / (lambda_inf + k_dep + CADR / V)
- *
- * Explicitly separates particulate removal (True HEPA) from gas/VOC removal (activated carbon + exhaust)
- * and never recommends ozone-generating ionizers.
+ * grounded in US EPA Residential Air Cleaners (3rd Ed.) & ANSI/AHAM AC-1.
+ * - Certified CADR mode uses CADR directly (already includes single-pass filter efficiency)
+ * - Raw Fan Airflow mode computes Effective CADR = Q * eta (for DIY fan + MERV-13 builds)
  */
 
 import { clampNumber, validateEnum } from './security.js';
@@ -23,22 +19,24 @@ export const INDOOR_SOURCE_PROFILES = Object.freeze({
   heavy: Object.freeze({ id: 'heavy', label: 'Frequent Frying / Incense / Mosquito Coils', emissionUgPerHr: 12000 })
 });
 
-const PM25_DEPOSITION_ACH = 0.39; // Typical indoor PM2.5 surface deposition loss rate (h^-1)
+export const FILTER_EFFICIENCY_PROFILES = Object.freeze({
+  h13: Object.freeze({ id: 'h13', label: 'True HEPA H13 (99.95% @ 0.3 µm)', efficiency: 0.9995, pct: 99.95 }),
+  epa11: Object.freeze({ id: 'epa11', label: 'EPA E11 / HEPA-Type (95%)', efficiency: 0.95, pct: 95 }),
+  merv13: Object.freeze({ id: 'merv13', label: 'MERV-13 DIY Box Filter (85% PM2.5)', efficiency: 0.85, pct: 85 })
+});
 
-/**
- * Calculates room volume, required CADR for target ACH, and steady-state indoor PM2.5
- * before vs. after mechanical HEPA filtration.
- *
- * @param {{
- *   floorAreaSqFt?: number,
- *   ceilingHeightFt?: number,
- *   outdoorPm25?: number,
- *   leakageId?: 'tight' | 'average' | 'leaky',
- *   indoorSourceId?: 'minimal' | 'cooking' | 'heavy',
- *   targetAch?: number,
- *   deviceCadrM3h?: number
- * }} params
- */
+const PM25_DEPOSITION_ACH = 0.39;
+
+function solveSteadyStatePm25(inflowUgPerM3Hr, baseLossRate, volumeM3, effectiveCadrM3h) {
+  const eAch = effectiveCadrM3h / volumeM3;
+  const steadyPm25 = inflowUgPerM3Hr / (baseLossRate + eAch);
+  return {
+    effectiveCadrM3h: Math.round(effectiveCadrM3h),
+    effectiveAch: Number(eAch.toFixed(2)),
+    steadyPm25: Number(steadyPm25.toFixed(1))
+  };
+}
+
 export function evaluateIndoorFiltration(params = {}) {
   const floorAreaSqFt = Math.round(clampNumber(params.floorAreaSqFt, 60, 2000, 220));
   const ceilingHeightFt = Number(clampNumber(params.ceilingHeightFt, 7, 16, 9).toFixed(1));
@@ -46,16 +44,17 @@ export function evaluateIndoorFiltration(params = {}) {
 
   const leakageKey = validateEnum(params.leakageId, Object.keys(LEAKAGE_PROFILES), 'average');
   const sourceKey = validateEnum(params.indoorSourceId, Object.keys(INDOOR_SOURCE_PROFILES), 'cooking');
+  const filterKey = validateEnum(params.filterGradeId, Object.keys(FILTER_EFFICIENCY_PROFILES), 'h13');
+  const inputMode = validateEnum(params.inputMode, ['cadr', 'airflow'], 'cadr');
 
   const leakage = LEAKAGE_PROFILES[leakageKey];
   const indoorSource = INDOOR_SOURCE_PROFILES[sourceKey];
+  const filterGrade = FILTER_EFFICIENCY_PROFILES[filterKey];
 
-  // Volume conversions: 1 sq.ft = 0.092903 m², 1 ft = 0.3048 m
   const floorAreaM2 = Number((floorAreaSqFt * 0.092903).toFixed(1));
   const ceilingHeightM = Number((ceilingHeightFt * 0.3048).toFixed(2));
   const volumeM3 = Number((floorAreaM2 * ceilingHeightM).toFixed(1));
 
-  // Target effective Air Changes per Hour (ASHRAE/AHAM baseline: 4.8 ACH for heavy smog, 3–4 for moderate)
   const recommendedAch = Number(clampNumber(
     params.targetAch ?? (outdoorPm25 > 120 ? 5 : outdoorPm25 > 60 ? 4 : 3),
     2,
@@ -64,41 +63,50 @@ export function evaluateIndoorFiltration(params = {}) {
   ).toFixed(1));
 
   const recommendedCadrM3h = Math.max(100, Math.round(volumeM3 * recommendedAch));
-  const activeCadrM3h = Math.round(clampNumber(params.deviceCadrM3h ?? recommendedCadrM3h, 0, 1500, recommendedCadrM3h));
-  const effectiveFiltrationAch = Number((activeCadrM3h / volumeM3).toFixed(2));
+  const requiredFanAirflowM3h = Math.round(recommendedCadrM3h / filterGrade.efficiency);
 
-  // Unfiltered steady-state indoor PM2.5 (CADR = 0)
+  const activeInputM3h = Math.round(clampNumber(params.deviceCadrM3h ?? recommendedCadrM3h, 0, 1500, recommendedCadrM3h));
+  const effectiveCadrM3h = inputMode === 'airflow'
+    ? activeInputM3h * filterGrade.efficiency
+    : activeInputM3h;
+
   const inflowUgPerM3Hr = leakage.penetration * leakage.ach * outdoorPm25 + (indoorSource.emissionUgPerHr / volumeM3);
   const unfilteredLossRate = leakage.ach + PM25_DEPOSITION_ACH;
   const unfilteredIndoorPm25 = Number((inflowUgPerM3Hr / unfilteredLossRate).toFixed(1));
 
-  // Filtered steady-state indoor PM2.5
-  const filteredLossRate = unfilteredLossRate + effectiveFiltrationAch;
-  const filteredIndoorPm25 = Number((inflowUgPerM3Hr / filteredLossRate).toFixed(1));
+  const activeOutcome = solveSteadyStatePm25(inflowUgPerM3Hr, unfilteredLossRate, volumeM3, effectiveCadrM3h);
+  const filteredIndoorPm25 = activeOutcome.steadyPm25;
 
   const reductionPct = unfilteredIndoorPm25 > 0
     ? Math.max(0, Math.round(((unfilteredIndoorPm25 - filteredIndoorPm25) / unfilteredIndoorPm25) * 100))
     : 0;
 
-  // Uncertainty band (+/- 15% reflecting door openings, variable filter loading, and real-world mixing)
   const filteredLow = Math.max(2, Number((filteredIndoorPm25 * 0.85).toFixed(1)));
   const filteredHigh = Number((filteredIndoorPm25 * 1.15).toFixed(1));
 
-  // Comparison across 3 budget tiers (no ozone/ionizer devices)
+  const maxCurveCadr = Math.max(600, Math.ceil((Math.max(effectiveCadrM3h, recommendedCadrM3h) + 120) / 100) * 100);
+  const curveSteps = 8;
+  const cadrCurve = [];
+  for (let i = 0; i <= curveSteps; i++) {
+    const cadr = Math.round((maxCurveCadr / curveSteps) * i);
+    const solved = solveSteadyStatePm25(inflowUgPerM3Hr, unfilteredLossRate, volumeM3, cadr);
+    cadrCurve.push({ cadrM3h: cadr, effectiveAch: solved.effectiveAch, indoorPm25: solved.steadyPm25 });
+  }
+
   const tiers = [
     {
       id: 'zero-cost',
       name: 'Zero-Cost Sealing & Source Control',
       estimatedCostInr: '₹0–₹300',
       cadrM3h: 0,
-      note: 'Weather-stripping door gaps reduces infiltration from leaky to tight (~0.3 ACH), and eliminating indoor combustion removes internal spikes. Does not actively filter already-infiltrated PM2.5.'
+      note: 'Weather-stripping door gaps reduces infiltration toward ~0.3 ACH, and removing indoor combustion eliminates internal spikes. Does not actively filter already-infiltrated PM2.5.'
     },
     {
       id: 'diy-budget',
-      name: `DIY Corsi-Rosenthal / Exhaust-Fan + H13 HEPA Box (${Math.max(1, Math.ceil(recommendedCadrM3h / 300))} unit${recommendedCadrM3h > 300 ? 's' : ''})`,
+      name: `DIY Corsi-Rosenthal / Exhaust-Fan + MERV-13/HEPA Box (${Math.max(1, Math.ceil(recommendedCadrM3h / 300))} unit${recommendedCadrM3h > 300 ? 's' : ''})`,
       estimatedCostInr: `~₹${(2400 * Math.max(1, Math.ceil(recommendedCadrM3h / 300))).toLocaleString('en-IN')}`,
       cadrM3h: Math.min(recommendedCadrM3h, 300 * Math.max(1, Math.ceil(recommendedCadrM3h / 300))),
-      note: 'Independent lab tests show properly sealed DIY fan + MERV-13/HEPA boxes deliver ~250–350 m³/h CADR per unit at a fraction of commercial cost.'
+      note: 'Independent aerosol-chamber tests show sealed DIY fan + MERV-13/HEPA boxes deliver ~250–350 m³/h effective CADR per unit at a fraction of commercial cost.'
     },
     {
       id: 'hepa-smart',
@@ -112,19 +120,25 @@ export function evaluateIndoorFiltration(params = {}) {
   return {
     dimensions: { floorAreaSqFt, floorAreaM2, ceilingHeightFt, ceilingHeightM, volumeM3 },
     assumptions: {
+      inputMode,
       leakageLabel: leakage.label,
       infiltrationAch: leakage.ach,
       penetrationFactor: leakage.penetration,
       depositionAch: PM25_DEPOSITION_ACH,
       indoorSourceLabel: indoorSource.label,
       indoorEmissionUgPerHr: indoorSource.emissionUgPerHr,
+      filterGradeId: filterGrade.id,
+      filterGradeLabel: filterGrade.label,
+      filterEfficiencyPct: filterGrade.pct,
       outdoorPm25
     },
     sizing: {
       recommendedAch,
       recommendedCadrM3h,
-      activeCadrM3h,
-      effectiveFiltrationAch
+      requiredFanAirflowM3h,
+      activeCadrM3h: activeInputM3h,
+      effectiveCadrM3h: activeOutcome.effectiveCadrM3h,
+      effectiveFiltrationAch: activeOutcome.effectiveAch
     },
     outcomes: {
       unfilteredIndoorPm25,
@@ -132,10 +146,14 @@ export function evaluateIndoorFiltration(params = {}) {
       filteredRange: [filteredLow, filteredHigh],
       reductionPct
     },
+    cadrCurve,
     tiers,
     safetyNotes: [
+      inputMode === 'cadr'
+        ? 'Certified CADR mode (ANSI/AHAM AC-1): CADR already incorporates filter efficiency (CADR = Q · η) and is not penalized twice. Steady-state C_in = (P·λ_inf·C_out + E/V) / (λ_inf + k_dep + CADR/V), ±15% mixing uncertainty.'
+        : `Raw Fan Airflow mode: Effective CADR = Airflow (${activeInputM3h} m³/h) × ${filterGrade.pct}% (${filterGrade.label}) = ${activeOutcome.effectiveCadrM3h} m³/h.`,
       'True HEPA filters capture fine particles (PM2.5/PM10) but do not remove gaseous NO₂, CO, or VOCs; use ducted kitchen exhaust and pelleted activated carbon for gases.',
-      'Avoid ozone-generating air cleaners or uncertified ionizers, as indoor ozone irritates airways and reacts with indoor compounds to create secondary ultrafine particles.'
+      'Avoid ozone-generating air cleaners or uncertified ionizers, as indoor ozone irritates airways and forms secondary ultrafine particles.'
     ]
   };
 }

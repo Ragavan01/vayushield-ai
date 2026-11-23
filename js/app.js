@@ -1,19 +1,16 @@
 /**
- * @fileoverview VayuShield Project APEX (v3.0) Application Controller.
- * Coordinates all 8 environmental intelligence modules with:
- * - Zero innerHTML and zero inline style mutations (strict CSP compliant)
- * - Circular SVG AQI arc gauge centerpiece with smooth semantic stroke mapping
- * - Debounced global city autocomplete combobox with full keyboard navigation
- * - Persisted location selection (never silently resets to Delhi on reload)
- * - Safe RFC-4180 CSV historical dataset export & non-sensitive summary sharing
- * - Multi-turn frosted-glass AI Coach thread with Copy, Retry, and Clear controls
- * - Scroll-synchronized desktop navigation bar & mobile bottom glass dock
+ * @fileoverview VayuShield Project APEX 2.0 (v3.1) Application Controller.
+ * - Zero innerHTML, zero inline styles (strict CSP compliant)
+ * - 8-pollutant CPCB bento grid (explicitly marks NH3 & Pb as Not in CAMS) + trend indicators
+ * - Interactive SVG Room Mass-Balance Blueprint & CADR/ACH Performance Curve
+ * - Explicit reference-scenario notices when live PM2.5 is missing (SCI-06)
+ * - Honest separation between Illustrative Examples and Local Device Entries (SCI-07)
+ * - IntersectionObserver nav-bar & mobile dock synchronization
  */
 
 import { compareToWhoGuideline } from './core/cpcbAqi.js';
 import {
   ACTION_CATEGORIES,
-  computeCommunityStats,
   moderateCommunitySubmission
 } from './core/communityModeration.js';
 import {
@@ -39,6 +36,7 @@ const STORAGE_SCENARIOS_KEY = 'vayushield_scenarios_v2';
 const STORAGE_PLEDGES_KEY = 'vayushield_pledges_v2';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const AQI_ARC_LENGTH = 145;
+const REFERENCE_DESIGN_PM25 = 120;
 
 const AQI_ARC_COLORS = Object.freeze({
   good: '#34D399',
@@ -50,9 +48,16 @@ const AQI_ARC_COLORS = Object.freeze({
   neutral: '#38BDF8'
 });
 
-const DEFAULT_PLEDGES = [
+const TREND_ARROWS = Object.freeze({
+  rising: '↑ Rising',
+  falling: '↓ Falling',
+  steady: '→ Steady'
+});
+
+const DEFAULT_DEMO_PLEDGES = [
   {
     id: 'seed-1',
+    origin: 'demo',
     area: 'Dwarka District, Delhi',
     category: 'zero-burning',
     action: 'Resident association adopted damp morning courtyard sweeping and composting for winter leaf litter.',
@@ -61,6 +66,7 @@ const DEFAULT_PLEDGES = [
   },
   {
     id: 'seed-2',
+    origin: 'demo',
     area: 'Indiranagar East, Bengaluru',
     category: 'mobility',
     action: 'Coordinated 4 shared school-run carpools across neighborhood families to cut morning corridor idling.',
@@ -69,6 +75,7 @@ const DEFAULT_PLEDGES = [
   },
   {
     id: 'seed-3',
+    origin: 'demo',
     area: 'Salt Lake Zone, Kolkata',
     category: 'indoor-care',
     action: 'Assembled low-cost MERV-13/HEPA fan boxes for the community senior reading room during peak winter haze.',
@@ -92,6 +99,15 @@ function saveJson(key, value) {
   } catch {
     // Gracefully ignore restricted storage contexts
   }
+}
+
+function loadPledgesWithOrigin() {
+  const stored = loadJson(STORAGE_PLEDGES_KEY, DEFAULT_DEMO_PLEDGES);
+  if (!Array.isArray(stored)) return [...DEFAULT_DEMO_PLEDGES];
+  return stored.map((item) => ({
+    ...item,
+    origin: item.origin === 'demo' || String(item.id || '').startsWith('seed-') ? 'demo' : 'local'
+  }));
 }
 
 function loadSavedLocation() {
@@ -121,8 +137,10 @@ const state = {
   indoorEval: null,
   profile: loadJson(STORAGE_PROFILE_KEY, normalizeProfile()),
   selectedScenarios: loadJson(STORAGE_SCENARIOS_KEY, ['transit-shift', 'sleep-filtration', 'fitted-n95']),
-  pledges: loadJson(STORAGE_PLEDGES_KEY, DEFAULT_PLEDGES),
+  pledges: loadPledgesWithOrigin(),
   activePledgeFilter: 'all',
+  iaqInputMode: 'cadr',
+  iaqFilterGrade: 'h13',
   customAch: null,
   customCadr: null,
   fetchToken: 0,
@@ -193,7 +211,6 @@ function setActiveLocation(loc, options = {}) {
     lat: Number(loc.lat),
     lon: Number(loc.lon)
   };
-  // Persist city selections (avoid persisting unnamed raw GPS coordinates without explicit need)
   if (options.persist !== false) {
     saveJson(STORAGE_LOCATION_KEY, state.location);
   }
@@ -236,7 +253,7 @@ function renderLiveIntelligence() {
   const intel = state.intel;
   if (!intel) return;
 
-  const { location, current, rollingAverages, cpcb, dispersion, metadata } = intel;
+  const { location, current, rollingAverages, pollutantTrends, cpcb, dispersion, metadata } = intel;
 
   document.getElementById('source-type-badge').textContent = `Modeled · ${metadata.gridResolution}`;
   const freshnessEl = document.getElementById('freshness-badge');
@@ -264,7 +281,6 @@ function renderLiveIntelligence() {
   document.getElementById('location-meta').textContent =
     `${formatCoord(location.lat, 'N', 'S')}, ${formatCoord(location.lon, 'E', 'W')} · Timezone: ${location.timezone}`;
 
-  // Circular AQI Centerpiece
   const aqiBox = document.getElementById('aqi-box');
   document.getElementById('aqi-standard-label').textContent = cpcb.isOfficialCpcb
     ? 'Official CPCB AQI'
@@ -274,17 +290,15 @@ function renderLiveIntelligence() {
   aqiBox.className = `aqi-centerpiece aqi-${cpcb.band?.id || 'neutral'}`;
   updateAqiGauge(cpcb.aqi, cpcb.band?.id || 'neutral');
 
-  // Immediate Action Callout
   const immediate = buildImmediateAction(intel, state.profile);
   const callout = document.getElementById('immediate-action');
   callout.className = `action-callout action-${immediate.level}`;
   document.getElementById('action-headline').textContent = immediate.headline;
   document.getElementById('action-detail').textContent = immediate.detail;
 
-  // Primary Pollutant & WHO 2021 Guideline Ratio
   const primary = cpcb.primaryPollutant;
   document.getElementById('primary-pollutant-line').textContent = primary
-    ? `Primary concern: ${primary.name} (${primary.concentration} ${primary.unit}, ${primary.averaging} rolling mean → sub-index ${primary.subIndex})`
+    ? `Primary concern: ${primary.name} (${primary.concentration} ${primary.unit}, ${primary.averaging} mean → sub-index ${primary.subIndex})`
     : 'Primary concern: Insufficient valid pollutant readings';
 
   const whoPm25 = compareToWhoGuideline('pm25', rollingAverages.pm25_24h);
@@ -299,56 +313,66 @@ function renderLiveIntelligence() {
     whoBadge.className = 'badge badge-neutral';
   }
 
-  // 6-Pollutant Breakdown Widgets
+  // All 8 CPCB Pollutants (6 modeled by CAMS + NH3 & Pb explicitly marked unavailable)
   const grid = document.getElementById('pollutant-grid');
   clearNode(grid);
 
   const subByKey = new Map(cpcb.subIndices.map((s) => [s.pollutant, s]));
   const displayOrder = [
-    { key: 'pm25', label: 'PM2.5', unit: 'µg/m³', avg: '24h mean', val: rollingAverages.pm25_24h, cur: current.pm25 },
-    { key: 'pm10', label: 'PM10', unit: 'µg/m³', avg: '24h mean', val: rollingAverages.pm10_24h, cur: current.pm10 },
-    { key: 'no2', label: 'NO₂', unit: 'µg/m³', avg: '24h mean', val: rollingAverages.no2_24h, cur: current.no2 },
-    { key: 'so2', label: 'SO₂', unit: 'µg/m³', avg: '24h mean', val: rollingAverages.so2_24h, cur: current.so2 },
-    { key: 'o3', label: 'O₃', unit: 'µg/m³', avg: '8h mean', val: rollingAverages.o3_8h, cur: current.o3 },
-    { key: 'co', label: 'CO', unit: 'mg/m³', avg: '8h mean', val: rollingAverages.coMg_8h, cur: current.coMg }
+    { key: 'pm25', label: 'PM2.5', unit: 'µg/m³', avg: '24h', val: rollingAverages.pm25_24h, cur: current.pm25, trend: pollutantTrends?.pm25 },
+    { key: 'pm10', label: 'PM10', unit: 'µg/m³', avg: '24h', val: rollingAverages.pm10_24h, cur: current.pm10, trend: pollutantTrends?.pm10 },
+    { key: 'no2', label: 'NO₂', unit: 'µg/m³', avg: '24h', val: rollingAverages.no2_24h, cur: current.no2, trend: pollutantTrends?.no2 },
+    { key: 'so2', label: 'SO₂', unit: 'µg/m³', avg: '24h', val: rollingAverages.so2_24h, cur: current.so2, trend: pollutantTrends?.so2 },
+    { key: 'o3', label: 'O₃', unit: 'µg/m³', avg: '8h', val: rollingAverages.o3_8h, cur: current.o3, trend: pollutantTrends?.o3 },
+    { key: 'co', label: 'CO', unit: 'mg/m³', avg: '8h', val: rollingAverages.coMg_8h, cur: current.coMg, trend: pollutantTrends?.co },
+    { key: 'nh3', label: 'NH₃', unit: 'µg/m³', avg: '24h', val: null, cur: null, unsupportedReason: 'Not in CAMS model' },
+    { key: 'pb', label: 'Pb', unit: 'µg/m³', avg: '24h', val: null, cur: null, unsupportedReason: 'Not in CAMS model' }
   ];
 
   for (const item of displayOrder) {
     const sub = subByKey.get(item.key);
     const isPrimary = primary && primary.pollutant === item.key;
-    const valStr = item.val !== null && item.val !== undefined
-      ? `${item.val} ${item.unit}`
-      : 'Unavailable';
-    const curStr = item.cur !== null && item.cur !== undefined
-      ? `Now: ${Number(item.cur).toFixed(item.key === 'co' ? 2 : 1)}`
-      : 'Now: —';
+    const isUnavailable = item.val === null || item.val === undefined;
+    const valStr = !isUnavailable ? `${item.val} ${item.unit}` : 'Unavailable';
+    const trendTxt = item.trend ? TREND_ARROWS[item.trend] || '' : '';
+    const subText = item.unsupportedReason
+      ? item.unsupportedReason
+      : isPrimary
+        ? `Now: ${Number(item.cur).toFixed(item.key === 'co' ? 2 : 1)} · Primary`
+        : item.cur !== null && item.cur !== undefined
+          ? `Now: ${Number(item.cur).toFixed(item.key === 'co' ? 2 : 1)} ${trendTxt}`.trim()
+          : 'No valid reading';
 
     const cell = createSafeElement(document, 'div', {
-      className: `pollutant-cell${isPrimary ? ' is-primary' : ''}`,
-      attrs: { title: `${item.label} ${item.avg}: ${valStr}. CPCB sub-index: ${sub ? sub.subIndex : 'N/A'}.` },
+      className: `pollutant-cell${isPrimary ? ' is-primary' : ''}${isUnavailable ? ' is-unavailable' : ''}`,
+      attrs: {
+        title: item.unsupportedReason
+          ? `${item.label}: ${item.unsupportedReason} (requires ground CAAQMS station).`
+          : `${item.label} (${item.avg} mean): ${valStr}. CPCB sub-index: ${sub ? sub.subIndex : 'N/A'}.`
+      },
       children: [
         createSafeElement(document, 'div', {
           className: 'pollutant-head',
           children: [
             createSafeElement(document, 'span', { text: `${item.label} (${item.avg})` }),
-            createSafeElement(document, 'span', { text: sub ? `SI ${sub.subIndex}` : '—' })
+            createSafeElement(document, 'span', { text: sub ? `SI ${sub.subIndex}` : 'N/A' })
           ]
         }),
         createSafeElement(document, 'strong', { className: 'pollutant-val', text: valStr }),
-        createSafeElement(document, 'span', {
-          className: 'pollutant-sub',
-          text: isPrimary ? `${curStr} · Primary Driver` : curStr
-        })
+        createSafeElement(document, 'span', { className: 'pollutant-sub', text: subText })
       ]
     });
     grid.appendChild(cell);
   }
 
   // Provenance Drawer
+  const yestNote = typeof rollingAverages.yesterdayPm25_24h === 'number'
+    ? ` Prior 24h (Yesterday) PM2.5 mean: ${rollingAverages.yesterdayPm25_24h} µg/m³.`
+    : '';
   document.getElementById('meta-provider-line').textContent =
-    `Air Quality Source: ${metadata.provider} (${metadata.gridResolution}, ${metadata.temporalResolution}). Weather Source: ${metadata.weatherProvider}. Retrieved: ${metadata.fetchedAt}.`;
+    `Air Quality Source: ${metadata.provider} (${metadata.gridResolution}, ${metadata.temporalResolution}). Weather Source: ${metadata.weatherProvider}. Retrieved: ${metadata.fetchedAt}.${yestNote}`;
   document.getElementById('meta-averaging-line').textContent =
-    `${cpcb.methodologyLabel}. ${metadata.averagingNote} NH₃ and Pb are not supplied by Open-Meteo CAMS.`;
+    `${cpcb.methodologyLabel}. ${metadata.averagingNote} NH₃ and Pb require ground monitoring stations.`;
 
   const heuristic = calculateMortalityRiskHeuristic(rollingAverages.pm25_24h);
   document.getElementById('meta-heuristic-line').textContent = heuristic
@@ -471,7 +495,7 @@ function renderHistoryChart() {
     { x: padL - 6, y: padT + 4, anchor: 'end', text: String(Math.round(maxVal)), fill: '#93A4BA' },
     { x: padL - 6, y: padT + plotH, anchor: 'end', text: '0', fill: '#93A4BA' },
     { x: padL, y: height - 6, anchor: 'start', text: sampled[0].time.slice(5, 16).replace('T', ' '), fill: '#93A4BA' },
-    { x: width - padR, y: height - 6, anchor: 'end', text: `Min ${minVal} · Avg ${avgVal} · Max ${maxVal} µg/m³`, fill: '#C8D4E3' }
+    { x: width - padR, y: height - 6, anchor: 'end', text: `Min ${minVal} · Avg ${avgVal} · Max ${maxVal} µg/m³`, fill: '#CBD6E4' }
   ];
   for (const l of axisLabels) {
     const t = createSvg('text', { x: l.x, y: l.y, 'text-anchor': l.anchor, fill: l.fill, 'font-size': '10' });
@@ -546,10 +570,10 @@ function renderDispersionModule() {
   }
 
   const hours = dispersion.hourly;
-  const maxPm = Math.max(40, ...hours.map((h) => h.pm25));
+  const maxPm = Math.max(65, ...hours.map((h) => h.pm25));
   const bestStart = dayWin?.startHour;
   const width = 460;
-  const height = 148;
+  const height = 152;
   const padL = 28;
   const padR = 10;
   const padT = 16;
@@ -566,6 +590,13 @@ function renderDispersionModule() {
     'aria-label': `Next 24-hour modeled hourly PM2.5 forecast. Best daytime window ${dayWin?.label}, peak window ${peakWin?.label}.`
   });
 
+  // CPCB 60 reference line across 24h forecast
+  const cpcbY = padT + plotH - (Math.min(60, maxPm) / maxPm) * plotH;
+  svg.appendChild(createSvg('line', {
+    x1: padL, y1: cpcbY.toFixed(1), x2: width - padR, y2: cpcbY.toFixed(1),
+    stroke: '#FBBF24', 'stroke-dasharray': '3 3', 'stroke-width': '1', opacity: '0.55'
+  }));
+
   hours.forEach((h, idx) => {
     const x = padL + idx * (barW + barGap);
     const bh = Math.max(6, (h.pm25 / maxPm) * plotH);
@@ -580,12 +611,7 @@ function renderDispersionModule() {
           : '#38BDF8';
 
     const bar = createSvg('rect', {
-      x: x.toFixed(1),
-      y: y.toFixed(1),
-      width: barW.toFixed(1),
-      height: bh.toFixed(1),
-      rx: '2.5',
-      fill
+      x: x.toFixed(1), y: y.toFixed(1), width: barW.toFixed(1), height: bh.toFixed(1), rx: '2.5', fill
     });
     const tip = createSvg('title');
     tip.textContent = `${h.hourLabel} (${h.isDaytime ? 'Daytime' : 'Overnight'}) — Forecast PM2.5: ${h.pm25} µg/m³ · ${h.dispersionCategory}${h.blh ? ` · BLH ${h.blh} m` : ''}`;
@@ -594,24 +620,14 @@ function renderDispersionModule() {
 
     if (idx % 4 === 0) {
       const lbl = createSvg('text', {
-        x: (x + barW / 2).toFixed(1),
-        y: height - 6,
-        'text-anchor': 'middle',
-        fill: '#93A4BA',
-        'font-size': '9.5'
+        x: (x + barW / 2).toFixed(1), y: height - 6, 'text-anchor': 'middle', fill: '#93A4BA', 'font-size': '9.5'
       });
       lbl.textContent = h.hourLabel;
       svg.appendChild(lbl);
     }
   });
 
-  const maxLbl = createSvg('text', {
-    x: padL - 4,
-    y: padT + 4,
-    'text-anchor': 'end',
-    fill: '#93A4BA',
-    'font-size': '9.5'
-  });
+  const maxLbl = createSvg('text', { x: padL - 4, y: padT + 4, 'text-anchor': 'end', fill: '#93A4BA', 'font-size': '9.5' });
   maxLbl.textContent = String(Math.round(maxPm));
   svg.appendChild(maxLbl);
 
@@ -632,7 +648,7 @@ function renderDispersionModule() {
   }
 }
 
-/* ==================== MODULE 4–6: ROUTINE, IAQ LAB & SIMULATOR ==================== */
+/* ==================== MODULE 4–6: ROUTINE, IAQ LAB (BLUEPRINT + CURVE) & SIMULATOR ==================== */
 
 function renderRoutine() {
   const list = document.getElementById('routine-list');
@@ -660,8 +676,178 @@ function renderRoutine() {
   }
 }
 
+function renderRoomBlueprint(evalResult) {
+  const host = document.getElementById('iaq-room-blueprint');
+  clearNode(host);
+  const { dimensions, assumptions, sizing, outcomes } = evalResult;
+
+  const svg = createSvg('svg', {
+    viewBox: '0 0 360 165',
+    class: 'chart-svg',
+    role: 'img',
+    'aria-label': `Room mass balance diagram: ${dimensions.floorAreaSqFt} square feet, ${dimensions.volumeM3} cubic meters, outdoor ${assumptions.outdoorPm25}, filtered indoor ${outcomes.filteredIndoorPm25} micrograms per cubic meter.`
+  });
+
+  // Outdoor zone indicator
+  svg.appendChild(createSvg('rect', { x: '6', y: '22', width: '78', height: '116', rx: '8', fill: 'rgba(251,191,36,0.1)', stroke: 'rgba(251,191,36,0.45)', 'stroke-dasharray': '4 3' }));
+  const outLbl = createSvg('text', { x: '45', y: '56', 'text-anchor': 'middle', fill: '#FDE68A', 'font-size': '9.5' });
+  outLbl.textContent = 'OUTDOOR';
+  svg.appendChild(outLbl);
+  const outVal = createSvg('text', { x: '45', y: '74', 'text-anchor': 'middle', fill: '#F5F8FC', 'font-size': '12', 'font-weight': '700' });
+  outVal.textContent = `${assumptions.outdoorPm25}`;
+  svg.appendChild(outVal);
+  const outUnit = createSvg('text', { x: '45', y: '88', 'text-anchor': 'middle', fill: '#93A4BA', 'font-size': '8.5' });
+  outUnit.textContent = 'µg/m³ PM2.5';
+  svg.appendChild(outUnit);
+  const leakTxt = createSvg('text', { x: '45', y: '116', 'text-anchor': 'middle', fill: '#FBBF24', 'font-size': '8.5' });
+  leakTxt.textContent = `Inf. ${assumptions.infiltrationAch} ACH`;
+  svg.appendChild(leakTxt);
+
+  // Infiltration arrow into room
+  svg.appendChild(createSvg('line', { x1: '86', y1: '80', x2: '108', y2: '80', stroke: '#FBBF24', 'stroke-width': '2' }));
+  svg.appendChild(createSvg('polygon', { points: '108,76 116,80 108,84', fill: '#FBBF24' }));
+
+  // Room enclosure
+  svg.appendChild(createSvg('rect', { x: '118', y: '20', width: '234', height: '120', rx: '12', fill: 'rgba(45,212,191,0.07)', stroke: 'rgba(45,212,191,0.55)', 'stroke-width': '1.5' }));
+  const dimTxt = createSvg('text', { x: '235', y: '37', 'text-anchor': 'middle', fill: '#93A4BA', 'font-size': '9.5' });
+  dimTxt.textContent = `${dimensions.floorAreaSqFt} sq.ft × ${dimensions.ceilingHeightFt} ft · Vol ${dimensions.volumeM3} m³`;
+  svg.appendChild(dimTxt);
+
+  // Steady-state indoor readout
+  const inVal = createSvg('text', { x: '198', y: '78', 'text-anchor': 'middle', fill: '#2DD4BF', 'font-size': '20', 'font-weight': '700' });
+  inVal.textContent = `${outcomes.filteredIndoorPm25} µg/m³`;
+  svg.appendChild(inVal);
+  const inSub = createSvg('text', { x: '198', y: '95', 'text-anchor': 'middle', fill: '#CBD6E4', 'font-size': '9' });
+  inSub.textContent = `Steady Indoor (-${outcomes.reductionPct}% vs ${outcomes.unfilteredIndoorPm25})`;
+  svg.appendChild(inSub);
+
+  // Purifier unit block inside room
+  svg.appendChild(createSvg('rect', { x: '278', y: '56', width: '62', height: '72', rx: '8', fill: 'rgba(56,189,248,0.16)', stroke: '#38BDF8', 'stroke-width': '1.2' }));
+  const purLbl = createSvg('text', { x: '309', y: '76', 'text-anchor': 'middle', fill: '#7DD3FC', 'font-size': '8.5', 'font-weight': '700' });
+  purLbl.textContent = assumptions.inputMode === 'airflow' ? 'DIY FAN' : 'HEPA';
+  svg.appendChild(purLbl);
+  const purVal = createSvg('text', { x: '309', y: '94', 'text-anchor': 'middle', fill: '#F5F8FC', 'font-size': '10.5', 'font-weight': '700' });
+  purVal.textContent = `${sizing.effectiveCadrM3h}`;
+  svg.appendChild(purVal);
+  const purSub = createSvg('text', { x: '309', y: '108', 'text-anchor': 'middle', fill: '#93A4BA', 'font-size': '8' });
+  purSub.textContent = 'm³/h eff.';
+  svg.appendChild(purSub);
+  const purAch = createSvg('text', { x: '309', y: '121', 'text-anchor': 'middle', fill: '#2DD4BF', 'font-size': '8' });
+  purAch.textContent = `${sizing.effectiveFiltrationAch} eACH`;
+  svg.appendChild(purAch);
+
+  // Footer note
+  const foot = createSvg('text', { x: '235', y: '156', 'text-anchor': 'middle', fill: '#93A4BA', 'font-size': '8.8' });
+  foot.textContent = `Sources: ${assumptions.indoorSourceLabel} · Dep. ${assumptions.depositionAch}/h`;
+  svg.appendChild(foot);
+
+  host.appendChild(svg);
+}
+
+function renderCadrCurveChart(evalResult) {
+  const host = document.getElementById('iaq-curve-chart');
+  clearNode(host);
+  const curve = evalResult.cadrCurve || [];
+  if (curve.length < 2) return;
+
+  const width = 410;
+  const height = 165;
+  const padL = 36;
+  const padR = 16;
+  const padT = 16;
+  const padB = 30;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  const maxPm = Math.max(70, ...curve.map((c) => c.indoorPm25));
+  const maxCadr = curve[curve.length - 1].cadrM3h || 600;
+
+  const svg = createSvg('svg', {
+    viewBox: `0 0 ${width} ${height}`,
+    class: 'chart-svg',
+    role: 'img',
+    'aria-label': `CADR performance curve from 0 to ${maxCadr} cubic meters per hour. Active effective CADR ${evalResult.sizing.effectiveCadrM3h} yields ${evalResult.outcomes.filteredIndoorPm25} micrograms per cubic meter.`
+  });
+
+  // Reference lines: WHO 15 & CPCB 60
+  for (const th of [{ val: 15, color: '#34D399', lbl: 'WHO 15' }, { val: 60, color: '#FBBF24', lbl: 'CPCB 60' }]) {
+    if (th.val <= maxPm) {
+      const ty = padT + plotH - (th.val / maxPm) * plotH;
+      svg.appendChild(createSvg('line', {
+        x1: padL, y1: ty.toFixed(1), x2: width - padR, y2: ty.toFixed(1),
+        stroke: th.color, 'stroke-dasharray': '3 3', 'stroke-width': '1', opacity: '0.55'
+      }));
+      const tl = createSvg('text', { x: width - padR, y: (ty - 3).toFixed(1), 'text-anchor': 'end', fill: th.color, 'font-size': '8.5' });
+      tl.textContent = th.lbl;
+      svg.appendChild(tl);
+    }
+  }
+
+  const coords = curve.map((pt) => {
+    const x = Number((padL + (pt.cadrM3h / maxCadr) * plotW).toFixed(1));
+    const y = Number((padT + plotH - (pt.indoorPm25 / maxPm) * plotH).toFixed(1));
+    return { x, y, pt };
+  });
+
+  svg.appendChild(createSvg('polyline', {
+    points: coords.map((c) => `${c.x},${c.y}`).join(' '),
+    fill: 'none',
+    stroke: '#38BDF8',
+    'stroke-width': '2.2',
+    'stroke-linejoin': 'round'
+  }));
+
+  for (const node of coords) {
+    const dot = createSvg('circle', { cx: node.x, cy: node.y, r: '3', fill: '#38BDF8' });
+    const tip = createSvg('title');
+    tip.textContent = `Eff. CADR ${node.pt.cadrM3h} m³/h (${node.pt.effectiveAch} eACH) → Indoor PM2.5: ${node.pt.indoorPm25} µg/m³`;
+    dot.appendChild(tip);
+    svg.appendChild(dot);
+  }
+
+  // Highlight active operating point
+  const activeX = padL + (Math.min(maxCadr, evalResult.sizing.effectiveCadrM3h) / maxCadr) * plotW;
+  const activeY = padT + plotH - (Math.min(maxPm, evalResult.outcomes.filteredIndoorPm25) / maxPm) * plotH;
+  const activeDot = createSvg('circle', { cx: activeX.toFixed(1), cy: activeY.toFixed(1), r: '5', fill: '#2DD4BF', stroke: '#050810', 'stroke-width': '1.5' });
+  const activeTip = createSvg('title');
+  activeTip.textContent = `Current Setting: ${evalResult.sizing.effectiveCadrM3h} m³/h effective CADR → ${evalResult.outcomes.filteredIndoorPm25} µg/m³`;
+  activeDot.appendChild(activeTip);
+  svg.appendChild(activeDot);
+
+  const axisLabels = [
+    { x: padL - 6, y: padT + 4, anchor: 'end', text: String(Math.round(maxPm)) },
+    { x: padL - 6, y: padT + plotH, anchor: 'end', text: '0' },
+    { x: padL, y: height - 8, anchor: 'start', text: '0 m³/h' },
+    { x: padL + plotW / 2, y: height - 8, anchor: 'middle', text: `Active: ${evalResult.sizing.effectiveCadrM3h} m³/h` },
+    { x: width - padR, y: height - 8, anchor: 'end', text: `${maxCadr} m³/h` }
+  ];
+  for (const l of axisLabels) {
+    const t = createSvg('text', { x: l.x, y: l.y, 'text-anchor': l.anchor, fill: '#93A4BA', 'font-size': '9.5' });
+    t.textContent = l.text;
+    svg.appendChild(t);
+  }
+
+  host.appendChild(svg);
+}
+
+function getOutdoorPm25WithProvenance() {
+  const live = state.intel?.rollingAverages?.pm25_24h ?? state.intel?.current?.pm25 ?? null;
+  if (typeof live === 'number' && Number.isFinite(live) && live >= 0) {
+    return { value: live, isReferenceFallback: false };
+  }
+  return { value: REFERENCE_DESIGN_PM25, isReferenceFallback: true };
+}
+
 function renderIndoorLab() {
-  const outdoorPm25 = state.intel?.rollingAverages?.pm25_24h ?? state.intel?.current?.pm25 ?? 120;
+  const { value: outdoorPm25, isReferenceFallback } = getOutdoorPm25WithProvenance();
+  const refNotice = document.getElementById('iaq-ref-notice');
+  if (isReferenceFallback) {
+    refNotice.textContent = `Reference Scenario Active (${REFERENCE_DESIGN_PM25} µg/m³): Live ambient PM2.5 is currently unavailable, so calculations illustrate a design smog load rather than live readings.`;
+    refNotice.hidden = false;
+  } else {
+    refNotice.hidden = true;
+  }
+
   const indoorSourceId = state.profile.cookingFuel === 'induction'
     ? 'minimal'
     : state.profile.cookingFuel === 'biomass-mixed'
@@ -674,6 +860,8 @@ function renderIndoorLab() {
     outdoorPm25,
     leakageId: state.profile.leakageId,
     indoorSourceId,
+    filterGradeId: state.iaqFilterGrade,
+    inputMode: state.iaqInputMode,
     targetAch: state.customAch ?? undefined,
     deviceCadrM3h: state.customCadr ?? undefined
   });
@@ -682,19 +870,25 @@ function renderIndoorLab() {
 
   const achInput = document.getElementById('iaq-ach-input');
   const cadrInput = document.getElementById('iaq-cadr-input');
+  document.getElementById('iaq-cadr-label').textContent = state.iaqInputMode === 'airflow'
+    ? 'Compare DIY Fan Airflow (m³/h)'
+    : 'Compare Purifier CADR (m³/h)';
   if (state.customAch === null) achInput.value = String(evalResult.sizing.recommendedAch);
   if (state.customCadr === null) cadrInput.value = String(evalResult.sizing.recommendedCadrM3h);
 
   document.getElementById('iaq-volume-badge').textContent =
     `Volume: ${evalResult.dimensions.volumeM3} m³ (${evalResult.dimensions.floorAreaM2} m² × ${evalResult.dimensions.ceilingHeightM} m)`;
-  document.getElementById('iaq-rec-cadr').textContent =
-    `${evalResult.sizing.recommendedCadrM3h} m³/h (${evalResult.sizing.recommendedAch} ACH)`;
-  document.getElementById('iaq-unfiltered').textContent =
-    `${evalResult.outcomes.unfilteredIndoorPm25} µg/m³`;
+  document.getElementById('iaq-rec-cadr').textContent = state.iaqInputMode === 'airflow'
+    ? `${evalResult.sizing.requiredFanAirflowM3h} m³/h fan (${evalResult.sizing.recommendedCadrM3h} CADR)`
+    : `${evalResult.sizing.recommendedCadrM3h} m³/h (${evalResult.sizing.recommendedAch} ACH)`;
+  document.getElementById('iaq-unfiltered').textContent = `${evalResult.outcomes.unfilteredIndoorPm25} µg/m³`;
   document.getElementById('iaq-filtered').textContent =
     `${evalResult.outcomes.filteredIndoorPm25} µg/m³ (${evalResult.outcomes.filteredRange[0]}–${evalResult.outcomes.filteredRange[1]})`;
   document.getElementById('iaq-reduction').textContent =
     `-${evalResult.outcomes.reductionPct}% (${evalResult.sizing.effectiveFiltrationAch} eACH)`;
+
+  renderRoomBlueprint(evalResult);
+  renderCadrCurveChart(evalResult);
 
   const barBox = document.getElementById('iaq-visual-bar');
   clearNode(barBox);
@@ -707,23 +901,22 @@ function renderIndoorLab() {
   });
 
   const rows = [
-    { label: `Outdoor Modeled (${outdoorPm25} µg/m³)`, val: outdoorPm25, fill: '#FBBF24', y: 12 },
+    { label: `${isReferenceFallback ? 'Ref. Outdoor' : 'Outdoor Modeled'} (${outdoorPm25} µg/m³)`, val: outdoorPm25, fill: '#FBBF24', y: 12 },
     { label: `Indoor Unfiltered (${evalResult.outcomes.unfilteredIndoorPm25} µg/m³)`, val: evalResult.outcomes.unfilteredIndoorPm25, fill: '#F87171', y: 40 },
-    { label: `Indoor Filtered @ ${evalResult.sizing.activeCadrM3h} m³/h (${evalResult.outcomes.filteredIndoorPm25} µg/m³)`, val: evalResult.outcomes.filteredIndoorPm25, fill: '#2DD4BF', y: 68 }
+    { label: `Indoor Filtered @ ${evalResult.sizing.effectiveCadrM3h} m³/h eff. (${evalResult.outcomes.filteredIndoorPm25} µg/m³)`, val: evalResult.outcomes.filteredIndoorPm25, fill: '#2DD4BF', y: 68 }
   ];
 
   for (const r of rows) {
-    const labelEl = createSvg('text', { x: '0', y: String(r.y), fill: '#C8D4E3', 'font-size': '10.5' });
+    const labelEl = createSvg('text', { x: '0', y: String(r.y), fill: '#CBD6E4', 'font-size': '10.5' });
     labelEl.textContent = r.label;
     svg.appendChild(labelEl);
 
     svg.appendChild(createSvg('rect', {
-      x: '245', y: String(r.y - 9), width: '310', height: '10', rx: '5', fill: 'rgba(255,255,255,0.08)'
+      x: '250', y: String(r.y - 9), width: '305', height: '10', rx: '5', fill: 'rgba(255,255,255,0.08)'
     }));
-
-    const fillW = Math.max(6, Math.round((r.val / maxRef) * 310));
+    const fillW = Math.max(6, Math.round((r.val / maxRef) * 305));
     svg.appendChild(createSvg('rect', {
-      x: '245', y: String(r.y - 9), width: String(fillW), height: '10', rx: '5', fill: r.fill
+      x: '250', y: String(r.y - 9), width: String(fillW), height: '10', rx: '5', fill: r.fill
     }));
   }
   barBox.appendChild(svg);
@@ -763,7 +956,15 @@ function renderIndoorLab() {
 }
 
 function renderImpactSimulator() {
-  const outdoorPm25 = state.intel?.rollingAverages?.pm25_24h ?? state.intel?.current?.pm25 ?? 120;
+  const { value: outdoorPm25, isReferenceFallback } = getOutdoorPm25WithProvenance();
+  const refNotice = document.getElementById('imp-ref-notice');
+  if (isReferenceFallback) {
+    refNotice.textContent = `Reference Scenario Active (${REFERENCE_DESIGN_PM25} µg/m³): Live ambient PM2.5 is currently unavailable; simulator values reflect a standard design smog baseline.`;
+    refNotice.hidden = false;
+  } else {
+    refNotice.hidden = true;
+  }
+
   const result = evaluateSelectedScenarios(state.selectedScenarios, state.profile, outdoorPm25);
 
   const list = document.getElementById('scenarios-list');
@@ -867,7 +1068,7 @@ function renderCoachThread() {
   if (state.coachHistory.length === 0) {
     out.appendChild(createSafeElement(document, 'p', {
       className: 'muted-text',
-      text: 'Select a suggested question above or ask anything about current air quality, dispersion windows, or indoor filtration.'
+      text: 'Select a suggested question above or ask anything about current air quality, yesterday’s comparison, dispersion windows, or indoor filtration.'
     }));
     return;
   }
@@ -882,7 +1083,6 @@ function renderCoachThread() {
     ]
   });
 
-  // Render newest turns at the top or chronological bottom — chronological matches familiar chat UX
   for (const turn of state.coachHistory) {
     out.appendChild(createSafeElement(document, 'div', {
       className: 'chat-bubble-user',
@@ -963,16 +1163,11 @@ async function handleCoachSubmit(rawQuestion, options = {}) {
   btn.disabled = true;
   btn.textContent = 'Evaluating Telemetry…';
 
-  if (options.resetThread) {
-    state.coachHistory = [];
-  }
+  if (options.resetThread) state.coachHistory = [];
 
   const turn = { id: token, question, loading: true, response: null };
   state.coachHistory.push(turn);
-  // Cap in-memory thread length to keep DOM lean
-  if (state.coachHistory.length > 8) {
-    state.coachHistory = state.coachHistory.slice(-8);
-  }
+  if (state.coachHistory.length > 8) state.coachHistory = state.coachHistory.slice(-8);
   renderCoachThread();
 
   const result = await askVayuShieldCoach({
@@ -995,19 +1190,21 @@ async function handleCoachSubmit(rawQuestion, options = {}) {
   btn.textContent = 'Ask VayuShield AI';
 }
 
-/* ==================== MODULE 8: COMMUNITY CLEAN-AIR NETWORK ==================== */
+/* ==================== MODULE 8: HONEST COMMUNITY BOARD (DEMO VS. LOCAL) ==================== */
 
 function renderCommunity() {
-  const stats = computeCommunityStats(state.pledges);
+  const localPledges = state.pledges.filter((p) => p.origin === 'local');
+  const demoPledges = state.pledges.filter((p) => p.origin !== 'local');
+
   const statsRow = document.getElementById('community-stats-badges');
   clearNode(statsRow);
   statsRow.appendChild(createSafeElement(document, 'span', {
     className: 'badge badge-teal',
-    text: `${stats.totalPledges} Initiatives`
+    text: `${localPledges.length} Saved on This Device`
   }));
   statsRow.appendChild(createSafeElement(document, 'span', {
     className: 'badge badge-neutral',
-    text: `${stats.totalSupporters} Total Supporters`
+    text: `${demoPledges.length} Illustrative Examples`
   }));
 
   const filterRow = document.getElementById('pledge-filter-row');
@@ -1037,15 +1234,16 @@ function renderCommunity() {
   if (visible.length === 0) {
     list.appendChild(createSafeElement(document, 'li', {
       className: 'subpanel muted-text',
-      text: 'No community initiatives logged in this category yet.'
+      text: 'No initiatives logged in this category yet.'
     }));
     return;
   }
 
   for (const pledge of visible) {
+    const isDemo = pledge.origin === 'demo';
     const upvoteBtn = createSafeElement(document, 'button', {
       className: 'btn btn-secondary btn-sm',
-      text: `Support (${pledge.supporters})`,
+      text: isDemo ? `Demo (${pledge.supporters})` : `Support (${pledge.supporters})`,
       attrs: {
         type: 'button',
         'aria-label': `Support clean-air initiative in ${pledge.area}, ${pledge.supporters} supporters`
@@ -1055,7 +1253,7 @@ function renderCommunity() {
       pledge.supporters += 1;
       saveJson(STORAGE_PLEDGES_KEY, state.pledges);
       renderCommunity();
-      showToast(`Recorded support for ${pledge.area}.`);
+      showToast(`Recorded local support for ${pledge.area}.`);
     });
 
     const li = createSafeElement(document, 'li', {
@@ -1067,6 +1265,10 @@ function renderCommunity() {
               className: 'provenance-row',
               children: [
                 createSafeElement(document, 'span', { className: 'badge badge-teal', text: categoryLabels[pledge.category] || 'Community' }),
+                createSafeElement(document, 'span', {
+                  className: isDemo ? 'badge badge-neutral' : 'badge badge-good',
+                  text: isDemo ? 'Illustrative Example' : 'Saved on This Device'
+                }),
                 createSafeElement(document, 'span', { className: 'mono-meta', text: pledge.area })
               ]
             }),
@@ -1161,8 +1363,7 @@ async function loadLocationIntelligence(forceRefresh = false) {
     renderLiveIntelligence();
     renderDispersionModule();
     renderDependentModules();
-    const initialQ = COACH_PROMPT_TEMPLATES[0].prompt;
-    handleCoachSubmit(initialQ, { resetThread: true });
+    handleCoachSubmit(COACH_PROMPT_TEMPLATES[0].prompt, { resetThread: true });
   } catch (err) {
     if (token !== state.fetchToken) return;
     showErrorBanner(
@@ -1171,6 +1372,7 @@ async function loadLocationIntelligence(forceRefresh = false) {
     );
     document.getElementById('freshness-badge').textContent = 'Unavailable';
     document.getElementById('freshness-badge').className = 'badge badge-alert';
+    renderDependentModules();
   } finally {
     if (token === state.fetchToken) setLoadingState(false);
   }
@@ -1242,9 +1444,27 @@ function initNavSync() {
       link.classList.toggle('is-active', link.getAttribute('href') === href);
     });
   };
+
   links.forEach((link) => {
     link.addEventListener('click', () => setActiveHref(link.getAttribute('href')));
   });
+
+  if (typeof IntersectionObserver !== 'undefined') {
+    const sections = ['#live-intelligence', '#dispersion-module', '#profile-module', '#workspace-module']
+      .map((sel) => document.querySelector(sel))
+      .filter(Boolean);
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (visible?.target?.id) setActiveHref(`#${visible.target.id}`);
+      },
+      { rootMargin: '-20% 0px -55% 0px', threshold: [0.1, 0.4] }
+    );
+    sections.forEach((s) => observer.observe(s));
+  }
 }
 
 function initEvents() {
@@ -1443,6 +1663,18 @@ function initEvents() {
     showToast('Household parameters reset to defaults.');
   });
 
+  document.getElementById('iaq-mode-select').addEventListener('change', (e) => {
+    state.iaqInputMode = e.target.value;
+    renderIndoorLab();
+    renderRoutine();
+  });
+
+  document.getElementById('iaq-filter-select').addEventListener('change', (e) => {
+    state.iaqFilterGrade = e.target.value;
+    renderIndoorLab();
+    renderRoutine();
+  });
+
   document.getElementById('iaq-ach-input').addEventListener('change', (e) => {
     state.customAch = Number(e.target.value);
     state.customCadr = null;
@@ -1502,11 +1734,11 @@ function initEvents() {
     }
 
     errorEl.hidden = true;
-    state.pledges.unshift(result.entry);
+    state.pledges.unshift({ ...result.entry, origin: 'local' });
     saveJson(STORAGE_PLEDGES_KEY, state.pledges);
     e.target.reset();
     renderCommunity();
-    showToast('Moderated community initiative published.');
+    showToast('Saved moderated initiative to your browser board.');
   });
 }
 

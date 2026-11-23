@@ -1,38 +1,38 @@
 /* ==========================================================================
-   VayuShield: Project APEX — Liquid Glass Environmental Design System
-   5-Tier Material Architecture · Strict WCAG 2.2 AA Contrast · Zero Bloat
+   VayuShield: Project APEX 2.0 — Spatial Liquid Glass Design System (v3.1)
+   5-Tier Material Architecture · GPU-Safe Selective Blur · WCAG 2.2 AA
    ========================================================================== */
 
 :root {
   /* Foundation Canvas — Deep Midnight Navy & Obsidian */
-  --bg-canvas: #050911;
-  --bg-canvas-elevated: #0A111D;
-  --bg-solid-fallback: #0E1624;
-  --bg-input: rgba(6, 11, 20, 0.72);
+  --bg-canvas: #050810;
+  --bg-solid-fallback: #0D1422;
+  --bg-input: rgba(6, 10, 18, 0.78);
 
   /* 5-Tier Liquid Glass Surface Tokens */
-  --glass-01-bg: rgba(14, 21, 34, 0.72);       /* Primary analytical panels */
-  --glass-02-bg: rgba(18, 27, 43, 0.76);       /* Floating widgets, nav, dock */
-  --glass-03-bg: rgba(255, 255, 255, 0.06);    /* Interactive glass controls */
-  --glass-03-hover: rgba(255, 255, 255, 0.11);
-  --glass-04-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.055) 0%, rgba(255, 255, 255, 0.018) 100%);
-  --glass-05-bg: rgba(10, 17, 29, 0.94);       /* Overlays, dropdowns, toasts */
+  --glass-01-bg: linear-gradient(165deg, rgba(18, 26, 41, 0.92) 0%, rgba(11, 17, 28, 0.94) 100%);
+  --glass-02-bg: rgba(16, 24, 38, 0.74);       /* Floating capsule nav, dock, workspace bar */
+  --glass-03-bg: rgba(255, 255, 255, 0.065);   /* Interactive tactile controls */
+  --glass-03-hover: rgba(255, 255, 255, 0.12);
+  --glass-04-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.018) 100%);
+  --glass-05-bg: rgba(10, 16, 28, 0.94);       /* Floating overlays, combobox, toasts */
 
-  /* Blur & Specular Rim Lighting */
-  --blur-panel: blur(20px) saturate(145%);
-  --blur-float: blur(26px) saturate(165%);
+  /* Selective Backdrop Blur (Applied ONLY to compact floating surfaces for 60/120Hz scroll) */
+  --blur-float: blur(24px) saturate(160%);
   --blur-overlay: blur(28px) saturate(175%);
 
+  /* Specular Rim Lighting & Elevation */
   --border-hairline: rgba(255, 255, 255, 0.085);
-  --border-default: rgba(255, 255, 255, 0.13);
+  --border-default: rgba(255, 255, 255, 0.14);
   --border-strong: rgba(255, 255, 255, 0.24);
-  --specular-top: inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  --shadow-panel: 0 20px 44px -22px rgba(0, 0, 0, 0.78);
-  --shadow-float: 0 24px 56px -18px rgba(0, 0, 0, 0.85);
+  --specular-top: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --specular-edge: inset 0 1px 0 rgba(255, 255, 255, 0.18), inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-panel: 0 22px 48px -24px rgba(0, 0, 0, 0.82);
+  --shadow-float: 0 24px 56px -18px rgba(0, 0, 0, 0.88);
 
   /* High-Contrast Typography */
   --ink-primary: #F5F8FC;
-  --ink-secondary: #C8D4E3;
+  --ink-secondary: #CBD6E4;
   --ink-muted: #93A4BA;
 
   /* Restrained Atmospheric Accents */
@@ -41,7 +41,7 @@
   --accent-teal-ink: #032220;
   --accent-cyan: #38BDF8;
   --accent-tint: rgba(45, 212, 191, 0.13);
-  --accent-border: rgba(45, 212, 191, 0.36);
+  --accent-border: rgba(45, 212, 191, 0.38);
 
   /* Semantic Status & AQI Band Tones */
   --status-good: #34D399;
@@ -49,18 +49,15 @@
   --status-warn: #FBBF24;
   --status-warn-bg: rgba(251, 191, 36, 0.14);
   --status-orange: #FB923C;
-  --status-orange-bg: rgba(251, 146, 60, 0.15);
   --status-alert: #F87171;
   --status-alert-bg: rgba(248, 113, 113, 0.15);
-  --status-severe: #FB7185;
-  --status-severe-bg: rgba(251, 113, 133, 0.2);
 
   /* Typography, Spacing, Radii & Motion Tokens */
   --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'IBM Plex Sans', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
   --radius-sm: 10px;
-  --radius-md: 14px;
-  --radius-lg: 20px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
   --radius-pill: 999px;
 
   --ease-apple: cubic-bezier(0.22, 1, 0.36, 1);
@@ -96,13 +93,22 @@ body {
   overflow-x: clip;
   display: flex;
   flex-direction: column;
-  /* Restrained static atmospheric ambient backdrop (inspired by dark obsidian + deep teal glass) */
   background-color: var(--bg-canvas);
+  position: relative;
+}
+
+/* GPU-composited static atmospheric backdrop (zero scroll repaints) */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  transform: translateZ(0);
   background-image:
-    radial-gradient(ellipse 68% 48% at 14% -6%, rgba(45, 212, 191, 0.11), transparent 62%),
-    radial-gradient(ellipse 56% 44% at 88% 8%, rgba(56, 189, 248, 0.09), transparent 60%),
-    radial-gradient(ellipse 52% 40% at 50% 102%, rgba(30, 58, 138, 0.14), transparent 65%);
-  background-attachment: fixed;
+    radial-gradient(ellipse 64% 46% at 12% -4%, rgba(45, 212, 191, 0.12), transparent 62%),
+    radial-gradient(ellipse 54% 44% at 88% 8%, rgba(56, 189, 248, 0.10), transparent 60%),
+    radial-gradient(ellipse 58% 42% at 50% 104%, rgba(30, 58, 138, 0.16), transparent 66%);
 }
 
 :focus-visible {
@@ -141,36 +147,38 @@ body {
 
 .container {
   width: 100%;
-  max-width: 1300px;
+  max-width: 1320px;
   margin: 0 auto;
   padding: 0 24px;
 }
 
-/* ==================== GLASS SURFACE 02: STICKY NAVIGATION BAR ==================== */
+/* ==================== GLASS SURFACE 02: FLOATING CAPSULE NAVIGATION ==================== */
 .site-header {
   position: sticky;
   top: 0;
   z-index: var(--z-header);
-  background-color: rgba(8, 13, 23, 0.88);
-  border-bottom: 1px solid var(--border-hairline);
+  padding: 12px 0 6px;
+}
+
+.header-capsule {
+  min-height: 60px;
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  background-color: rgba(12, 18, 30, 0.92);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--specular-edge), var(--shadow-float);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
 }
 
 @supports (backdrop-filter: blur(1px)) {
-  .site-header {
+  .header-capsule {
     background-color: var(--glass-02-bg);
     backdrop-filter: var(--blur-float);
     -webkit-backdrop-filter: var(--blur-float);
   }
-}
-
-.header-inner {
-  min-height: 64px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding-top: 8px;
-  padding-bottom: 8px;
 }
 
 .brand {
@@ -179,16 +187,17 @@ body {
   gap: 10px;
   text-decoration: none;
   color: var(--ink-primary);
+  padding-left: 4px;
 }
 
 .brand-mark {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(145deg, rgba(45, 212, 191, 0.24), rgba(56, 189, 248, 0.14));
+  background: linear-gradient(145deg, rgba(45, 212, 191, 0.28), rgba(56, 189, 248, 0.14));
   border: 1px solid var(--accent-border);
   box-shadow: var(--specular-top);
   color: var(--accent-teal);
@@ -202,13 +211,13 @@ body {
 }
 
 .brand-name {
-  font-size: 1rem;
+  font-size: 0.98rem;
   font-weight: 700;
   letter-spacing: -0.02em;
 }
 
 .brand-tag {
-  font-size: 0.7rem;
+  font-size: 0.69rem;
   color: var(--ink-muted);
   font-weight: 500;
 }
@@ -219,12 +228,12 @@ body {
   gap: 4px;
   padding: 4px;
   border-radius: var(--radius-pill);
-  background-color: rgba(255, 255, 255, 0.04);
+  background-color: rgba(255, 255, 255, 0.045);
   border: 1px solid var(--border-hairline);
 }
 
 .nav-link {
-  font-size: 0.82rem;
+  font-size: 0.81rem;
   font-weight: 500;
   color: var(--ink-secondary);
   text-decoration: none;
@@ -241,6 +250,7 @@ body {
 .nav-link.is-active {
   color: var(--accent-teal);
   background-color: var(--accent-tint);
+  box-shadow: var(--specular-top);
 }
 
 .header-actions {
@@ -249,7 +259,7 @@ body {
   gap: 8px;
 }
 
-/* ==================== GLASS SURFACE 03: INTERACTIVE CONTROLS ==================== */
+/* ==================== GLASS SURFACE 03: TACTILE CONTROLS ==================== */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -272,7 +282,7 @@ body {
 }
 
 .btn:active:not(:disabled) {
-  transform: scale(0.98);
+  transform: scale(0.975);
 }
 
 .btn-sm {
@@ -296,7 +306,7 @@ body {
 .btn-primary {
   background-color: var(--accent-teal);
   color: var(--accent-teal-ink);
-  box-shadow: 0 8px 22px -10px rgba(45, 212, 191, 0.6);
+  box-shadow: 0 10px 24px -12px rgba(45, 212, 191, 0.7);
 }
 
 .btn-primary:hover:not(:disabled) {
@@ -351,7 +361,7 @@ body {
 .badge-modeled {
   background-color: rgba(56, 189, 248, 0.13);
   color: #7DD3FC;
-  border-color: rgba(56, 189, 248, 0.3);
+  border-color: rgba(56, 189, 248, 0.32);
 }
 
 .badge-teal {
@@ -363,19 +373,19 @@ body {
 .badge-good {
   background-color: var(--status-good-bg);
   color: #86EFAC;
-  border-color: rgba(52, 211, 153, 0.34);
+  border-color: rgba(52, 211, 153, 0.35);
 }
 
 .badge-warn {
   background-color: var(--status-warn-bg);
   color: #FDE68A;
-  border-color: rgba(251, 191, 36, 0.34);
+  border-color: rgba(251, 191, 36, 0.35);
 }
 
 .badge-alert {
   background-color: var(--status-alert-bg);
   color: #FCA5A5;
-  border-color: rgba(248, 113, 113, 0.36);
+  border-color: rgba(248, 113, 113, 0.38);
 }
 
 .badge-neutral {
@@ -383,30 +393,24 @@ body {
   color: var(--ink-secondary);
 }
 
-/* ==================== MAIN LAYOUT & GLASS SURFACE 01 ==================== */
+/* ==================== MAIN BENTO LAYOUT & GLASS SURFACE 01 ==================== */
 .main-layout {
   flex: 1;
-  padding-top: 26px;
-  padding-bottom: 56px;
+  padding-top: 20px;
+  padding-bottom: 58px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 22px;
 }
 
+/* Primary analytical surfaces use rich translucent glass without expensive full-page scroll blur */
 .panel {
+  background: var(--glass-01-bg);
   background-color: var(--bg-solid-fallback);
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-lg);
   padding: 24px;
-  box-shadow: var(--specular-top), var(--shadow-panel);
-}
-
-@supports (backdrop-filter: blur(1px)) {
-  .panel {
-    background-color: var(--glass-01-bg);
-    backdrop-filter: var(--blur-panel);
-    -webkit-backdrop-filter: var(--blur-panel);
-  }
+  box-shadow: var(--specular-edge), var(--shadow-panel);
 }
 
 .subpanel {
@@ -419,7 +423,7 @@ body {
 
 .intel-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.22fr) minmax(0, 0.98fr);
+  grid-template-columns: minmax(0, 1.26fr) minmax(0, 0.94fr);
   gap: 22px;
   align-items: start;
 }
@@ -427,7 +431,8 @@ body {
 .intel-grid > *,
 .split-2 > *,
 .profile-grid > *,
-.pollutant-grid > * {
+.pollutant-grid > *,
+.iaq-viz-grid > * {
   min-width: 0;
 }
 
@@ -449,19 +454,19 @@ body {
 
 .eyebrow {
   margin: 0;
-  font-size: 0.72rem;
+  font-size: 0.71rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.09em;
   color: var(--accent-teal);
 }
 
 .city-title {
   margin: 0;
-  font-size: clamp(1.45rem, 2.2vw, 1.85rem);
+  font-size: clamp(1.5rem, 2.3vw, 1.95rem);
   font-weight: 700;
-  letter-spacing: -0.025em;
-  line-height: 1.18;
+  letter-spacing: -0.028em;
+  line-height: 1.15;
 }
 
 .panel-title {
@@ -503,7 +508,7 @@ body {
 .mono-meta {
   margin: 4px 0 0;
   font-family: var(--font-mono);
-  font-size: 0.75rem;
+  font-size: 0.74rem;
   color: var(--ink-muted);
 }
 
@@ -511,7 +516,7 @@ body {
   color: var(--accent-teal);
 }
 
-/* Error Banner */
+/* Error & Reference Scenario Banners */
 .error-banner {
   background-color: var(--status-alert-bg);
   border: 1px solid rgba(248, 113, 113, 0.42);
@@ -524,19 +529,30 @@ body {
   gap: 12px;
 }
 
-.error-banner[hidden] {
+.error-banner[hidden],
+.ref-notice[hidden] {
   display: none;
 }
 
-/* ==================== AQI CIRCULAR ARC CENTERPIECE ==================== */
+.ref-notice {
+  background-color: var(--status-warn-bg);
+  border: 1px solid rgba(251, 191, 36, 0.34);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  font-size: 0.8rem;
+  color: #FDE68A;
+}
+
+/* ==================== FLOATING LIQUID GLASS AQI CENTERPIECE ==================== */
 .aqi-centerpiece {
   position: relative;
-  min-width: 152px;
-  padding: 12px 14px;
-  border-radius: var(--radius-md);
-  background: var(--glass-04-bg);
+  min-width: 162px;
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  background-color: rgba(16, 25, 40, 0.88);
   border: 1px solid var(--border-default);
-  box-shadow: var(--specular-top);
+  box-shadow: var(--specular-edge), 0 16px 36px -16px rgba(0, 0, 0, 0.8);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -545,10 +561,18 @@ body {
   flex-shrink: 0;
 }
 
+@supports (backdrop-filter: blur(1px)) {
+  .aqi-centerpiece {
+    background-color: var(--glass-02-bg);
+    backdrop-filter: var(--blur-float);
+    -webkit-backdrop-filter: var(--blur-float);
+  }
+}
+
 .aqi-gauge-wrap {
   position: relative;
-  width: 118px;
-  height: 82px;
+  width: 124px;
+  height: 84px;
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -561,36 +585,40 @@ body {
   height: 100%;
 }
 
+.aqi-arc-animated {
+  transition: stroke-dashoffset var(--dur-med) var(--ease-apple), stroke var(--dur-med) var(--ease-apple);
+}
+
 .aqi-gauge-value {
   position: relative;
   z-index: 1;
-  font-size: 2.1rem;
+  font-size: 2.2rem;
   font-weight: 700;
   line-height: 1;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.035em;
   padding-bottom: 4px;
 }
 
 .aqi-caption {
-  font-size: 0.68rem;
+  font-size: 0.67rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--ink-muted);
 }
 
 .aqi-band {
-  font-size: 0.78rem;
+  font-size: 0.79rem;
   font-weight: 700;
   margin-top: 2px;
 }
 
 .aqi-neutral { color: var(--ink-primary); }
-.aqi-good, .aqi-satisfactory { color: #86EFAC; border-color: rgba(52, 211, 153, 0.35); }
-.aqi-moderate { color: #FDE68A; border-color: rgba(251, 191, 36, 0.35); }
-.aqi-poor { color: #FDBA74; border-color: rgba(251, 146, 60, 0.38); }
-.aqi-very-poor { color: #FCA5A5; border-color: rgba(248, 113, 113, 0.42); }
-.aqi-severe { color: #FDA4AF; border-color: rgba(251, 113, 133, 0.48); }
+.aqi-good, .aqi-satisfactory { color: #86EFAC; border-color: rgba(52, 211, 153, 0.42); }
+.aqi-moderate { color: #FDE68A; border-color: rgba(251, 191, 36, 0.42); }
+.aqi-poor { color: #FDBA74; border-color: rgba(251, 146, 60, 0.45); }
+.aqi-very-poor { color: #FCA5A5; border-color: rgba(248, 113, 113, 0.48); }
+.aqi-severe { color: #FDA4AF; border-color: rgba(251, 113, 133, 0.52); }
 
 /* Immediate Action Callout */
 .action-callout {
@@ -679,7 +707,7 @@ body {
   border-radius: var(--radius-md);
   background-color: var(--glass-05-bg);
   border: 1px solid var(--border-default);
-  box-shadow: var(--specular-top), var(--shadow-float);
+  box-shadow: var(--specular-edge), var(--shadow-float);
   display: grid;
   gap: 2px;
 }
@@ -743,7 +771,7 @@ textarea:hover {
 }
 
 select option {
-  background-color: #0E1624;
+  background-color: #0D1422;
   color: var(--ink-primary);
 }
 
@@ -794,10 +822,10 @@ textarea::placeholder {
   color: var(--accent-teal);
 }
 
-/* ==================== GLASS SURFACE 04: METRIC & POLLUTANT WIDGETS ==================== */
+/* ==================== GLASS SURFACE 04: 8-POLLUTANT BENTO METRIC WIDGETS ==================== */
 .pollutant-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 10px;
   margin-bottom: 20px;
 }
@@ -806,10 +834,10 @@ textarea::placeholder {
   background: var(--glass-04-bg);
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-md);
-  padding: 12px 14px;
+  padding: 12px 13px;
   box-shadow: var(--specular-top);
   font-variant-numeric: tabular-nums;
-  transition: border-color var(--dur-fast) var(--ease-apple);
+  transition: border-color var(--dur-fast) var(--ease-apple), transform var(--dur-fast) var(--ease-apple);
 }
 
 .pollutant-cell:hover {
@@ -818,19 +846,25 @@ textarea::placeholder {
 
 .pollutant-cell.is-primary {
   border-color: var(--accent-border);
-  background: linear-gradient(180deg, rgba(45, 212, 191, 0.11) 0%, rgba(45, 212, 191, 0.025) 100%);
+  background: linear-gradient(180deg, rgba(45, 212, 191, 0.12) 0%, rgba(45, 212, 191, 0.025) 100%);
+}
+
+.pollutant-cell.is-unavailable {
+  opacity: 0.68;
+  border-style: dashed;
 }
 
 .pollutant-head {
   display: flex;
   justify-content: space-between;
-  font-size: 0.73rem;
+  gap: 4px;
+  font-size: 0.71rem;
   color: var(--ink-muted);
 }
 
 .pollutant-val {
   display: block;
-  font-size: 1.08rem;
+  font-size: 1.04rem;
   font-weight: 700;
   letter-spacing: -0.015em;
   margin-top: 5px;
@@ -838,7 +872,7 @@ textarea::placeholder {
 
 .pollutant-sub {
   display: block;
-  font-size: 0.72rem;
+  font-size: 0.71rem;
   color: var(--ink-muted);
   margin-top: 3px;
 }
@@ -851,7 +885,7 @@ textarea::placeholder {
 
 .segmented {
   display: inline-flex;
-  background-color: rgba(6, 11, 20, 0.75);
+  background-color: rgba(6, 10, 18, 0.78);
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-pill);
   padding: 3px;
@@ -879,7 +913,7 @@ textarea::placeholder {
 
 .chart-box {
   width: 100%;
-  background-color: rgba(5, 10, 18, 0.85);
+  background-color: rgba(5, 9, 17, 0.88);
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-md);
   padding: 12px;
@@ -892,12 +926,12 @@ textarea::placeholder {
 
 .chart-svg {
   width: 100%;
-  min-width: 320px;
+  min-width: 300px;
   height: auto;
   display: block;
 }
 
-/* Weather & Window Cards */
+/* Weather & Window Bento Cards */
 .wx-strip {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -948,7 +982,7 @@ textarea::placeholder {
 .window-val {
   display: block;
   font-family: var(--font-mono);
-  font-size: 0.94rem;
+  font-size: 0.93rem;
   font-weight: 600;
   margin: 3px 0;
 }
@@ -1028,7 +1062,7 @@ textarea::placeholder {
   color: var(--ink-secondary);
 }
 
-/* Workspace Pill Tabs */
+/* Floating Glass Workspace Pill Bar */
 .workspace {
   display: flex;
   flex-direction: column;
@@ -1039,18 +1073,18 @@ textarea::placeholder {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  background-color: var(--bg-solid-fallback);
-  border: 1px solid var(--border-hairline);
-  border-radius: var(--radius-lg);
+  background-color: rgba(13, 20, 34, 0.9);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
   padding: 6px;
-  box-shadow: var(--specular-top);
+  box-shadow: var(--specular-edge);
 }
 
 @supports (backdrop-filter: blur(1px)) {
   .tablist {
     background-color: var(--glass-02-bg);
-    backdrop-filter: var(--blur-panel);
-    -webkit-backdrop-filter: var(--blur-panel);
+    backdrop-filter: var(--blur-float);
+    -webkit-backdrop-filter: var(--blur-float);
   }
 }
 
@@ -1061,7 +1095,7 @@ textarea::placeholder {
   font-size: 0.84rem;
   font-weight: 600;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--ink-muted);
   cursor: pointer;
@@ -1084,7 +1118,7 @@ textarea::placeholder {
   display: none;
 }
 
-/* Routine Cards */
+/* Routine Bento Cards */
 .routine-grid {
   list-style: none;
   margin: 0;
@@ -1130,11 +1164,11 @@ textarea::placeholder {
   color: var(--ink-secondary);
 }
 
-/* IAQ Lab */
+/* IAQ Lab — Blueprint + CADR Curve Bento Grid */
 .iaq-controls {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 14px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
   margin-bottom: 14px;
 }
 
@@ -1145,8 +1179,15 @@ textarea::placeholder {
   margin-bottom: 14px;
 }
 
+.iaq-viz-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
 .iaq-compare-box {
-  background-color: rgba(5, 10, 18, 0.85);
+  background-color: rgba(5, 9, 17, 0.88);
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-md);
   padding: 14px;
@@ -1161,7 +1202,7 @@ textarea::placeholder {
 }
 
 .safety-box {
-  background-color: rgba(5, 10, 18, 0.75);
+  background-color: rgba(5, 9, 17, 0.78);
   border: 1px solid var(--border-hairline);
   border-left: 3px solid var(--accent-cyan);
   border-radius: var(--radius-md);
@@ -1247,7 +1288,7 @@ progress {
   height: 8px;
   border-radius: var(--radius-pill);
   border: 0;
-  background-color: rgba(6, 11, 20, 0.85);
+  background-color: rgba(6, 10, 18, 0.85);
   accent-color: var(--accent-teal);
 }
 
@@ -1275,7 +1316,7 @@ progress {
   justify-self: end;
   max-width: 82%;
   padding: 11px 16px;
-  border-radius: 16px 16px 4px 16px;
+  border-radius: 18px 18px 4px 18px;
   background-color: var(--accent-tint);
   border: 1px solid var(--accent-border);
   color: var(--ink-primary);
@@ -1285,7 +1326,7 @@ progress {
 .coach-card {
   background: var(--glass-04-bg);
   border: 1px solid var(--border-default);
-  border-radius: 16px 16px 16px 4px;
+  border-radius: 18px 18px 18px 4px;
   padding: 18px;
   box-shadow: var(--specular-top);
   display: grid;
@@ -1384,7 +1425,7 @@ progress {
   padding: 10px 16px;
   font-size: 0.82rem;
   font-weight: 500;
-  box-shadow: var(--specular-top), var(--shadow-float);
+  box-shadow: var(--specular-edge), var(--shadow-float);
 }
 
 @supports (backdrop-filter: blur(1px)) {
@@ -1401,7 +1442,7 @@ progress {
 .site-footer {
   border-top: 1px solid var(--border-hairline);
   padding: 20px 0;
-  background-color: rgba(6, 10, 18, 0.9);
+  background-color: rgba(6, 10, 18, 0.92);
 }
 
 .footer-inner {
@@ -1422,16 +1463,23 @@ progress {
   .intel-grid {
     grid-template-columns: 1fr;
   }
+
+  .pollutant-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
 }
 
 @media (max-width: 900px) {
   .split-2,
-  .card-grid-3 {
+  .card-grid-3,
+  .iaq-viz-grid {
     grid-template-columns: 1fr;
   }
 
   .profile-grid,
-  .iaq-summary-strip {
+  .iaq-controls,
+  .iaq-summary-strip,
+  .pollutant-grid {
     grid-template-columns: repeat(2, 1fr);
   }
 }
@@ -1441,14 +1489,27 @@ progress {
     display: none;
   }
 
+  .header-capsule {
+    border-radius: var(--radius-lg);
+    padding: 8px 12px;
+  }
+
   body {
-    padding-bottom: 72px;
+    padding-bottom: 76px;
   }
 
   .toast-region {
     bottom: 84px;
     left: 14px;
     right: 14px;
+  }
+
+  .tablist {
+    border-radius: var(--radius-lg);
+  }
+
+  .tab-btn {
+    border-radius: var(--radius-sm);
   }
 
   .mobile-bottom-nav {
@@ -1462,9 +1523,9 @@ progress {
     gap: 4px;
     padding: 6px;
     border-radius: var(--radius-lg);
-    background-color: rgba(10, 17, 29, 0.94);
+    background-color: rgba(10, 16, 28, 0.94);
     border: 1px solid var(--border-default);
-    box-shadow: var(--specular-top), var(--shadow-float);
+    box-shadow: var(--specular-edge), var(--shadow-float);
   }
 
   @supports (backdrop-filter: blur(1px)) {
@@ -1533,6 +1594,10 @@ progress {
 }
 
 @media (max-width: 420px) {
+  .brand-tag {
+    display: none;
+  }
+
   .search-bar {
     flex-direction: column;
   }

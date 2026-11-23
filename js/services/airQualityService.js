@@ -1,11 +1,9 @@
 /**
- * @fileoverview Resilient Dual-API Atmospheric Data Service (Project Chimera v2.5).
- * - Fetches Open-Meteo Air Quality (CAMS modeled pollutants) + Weather Forecast
- *   (BLH, wind, temperature, humidity, precipitation, solar radiation, daily sunrise/sunset).
- * - Slices exact 24h / 7d / 30d history horizons (fixes 32-point overrun).
- * - Evaluates true measurement freshness via dataIntegrity.js.
- * - Preserves last valid cache for the SAME location with an explicit Stale warning if an upstream retry fails,
- *   while NEVER substituting a different city's data.
+ * @fileoverview Resilient Dual-API Atmospheric Data Service.
+ * - Open-Meteo Air Quality (CAMS) + Weather Forecast (BLH, wind, sunrise/sunset, utc_offset_seconds)
+ * - Exact 24h / 7d / 30d history slicing + prior 24h comparison (yesterdayPm25_24h)
+ * - Passes both 8-hr and 1-hr O3 into CPCB NAQI engine
+ * - Same-location stale-while-error fallback (never substitutes another city)
  */
 
 import { calculateCpcbAqi, coUgToMg, computeRollingAverage } from '../core/cpcbAqi.js';
@@ -21,9 +19,7 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 8_500;
 const MAX_RETRIES = 1;
 
-/** @type {Map<string, { expiresAt: number, data: any }>} */
 const responseCache = new Map();
-/** @type {Map<string, Promise<any>>} */
 const inflightRequests = new Map();
 
 export const CURATED_CITIES = Object.freeze([
@@ -90,11 +86,6 @@ export async function geocodeCity(query, options = {}) {
   };
 }
 
-/**
- * Fetches up to 5 geocoded city suggestions for the debounced autocomplete combobox.
- * @param {string} query
- * @param {{ fetchImpl?: typeof fetch }} [options]
- */
 export async function searchCitySuggestions(query, options = {}) {
   const clean = sanitizeText(query, 80);
   if (clean.length < 2) return [];
@@ -112,11 +103,6 @@ export async function searchCitySuggestions(query, options = {}) {
   }));
 }
 
-/**
- * Generates an RFC-4180 CSV string with formula-injection protection for the active historical series.
- * @param {any} intel
- * @returns {string}
- */
 export function buildHistoricalCsv(intel) {
   const safeCell = (val) => {
     const str = val === null || val === undefined ? '' : String(val);
@@ -151,10 +137,21 @@ function findCurrentHourIndex(times, currentIso) {
   return Math.max(0, Math.min(24, times.length - 1));
 }
 
+function computeSimpleTrend(currentVal, baselineVal) {
+  if (typeof currentVal !== 'number' || typeof baselineVal !== 'number' || baselineVal <= 0) {
+    return 'steady';
+  }
+  const pct = ((currentVal - baselineVal) / baselineVal) * 100;
+  if (pct >= 12) return 'rising';
+  if (pct <= -12) return 'falling';
+  return 'steady';
+}
+
 export async function fetchAirIntelligence(location, options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const now = options.now || (() => Date.now());
   const pastDays = [1, 7, 30].includes(options.pastDays) ? options.pastDays : 1;
+  const fetchPastDays = Math.max(2, pastDays);
   const forceRefresh = options.forceRefresh === true;
 
   const lat = Number(clampNumber(location.lat, -90, 90, 28.6139).toFixed(4));
@@ -163,7 +160,10 @@ export async function fetchAirIntelligence(location, options = {}) {
 
   const cached = responseCache.get(cacheKey);
   if (!forceRefresh && cached && cached.expiresAt > now()) {
-    const freshness = evaluateDataFreshness(cached.data.current.timestamp, now(), { sourceType: 'modeled' });
+    const freshness = evaluateDataFreshness(cached.data.current.timestamp, now(), {
+      sourceType: 'modeled',
+      utcOffsetSeconds: cached.data.location.utcOffsetSeconds
+    });
     return {
       ...cached.data,
       metadata: { ...cached.data.metadata, freshness: freshness.label, freshnessState: freshness, fromCache: true }
@@ -175,7 +175,7 @@ export async function fetchAirIntelligence(location, options = {}) {
   }
 
   const work = (async () => {
-    const aqUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&hourly=pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,ozone,us_aqi&current=pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,ozone,us_aqi&past_days=${pastDays}&forecast_days=2&timezone=auto`;
+    const aqUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&hourly=pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,ozone,us_aqi&current=pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,ozone,us_aqi&past_days=${fetchPastDays}&forecast_days=2&timezone=auto`;
     const wxUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,boundary_layer_height,precipitation,shortwave_radiation&daily=sunrise,sunset&current=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m&past_days=1&forecast_days=2&timezone=auto`;
 
     const [aqResult, wxResult] = await Promise.allSettled([
@@ -184,11 +184,11 @@ export async function fetchAirIntelligence(location, options = {}) {
     ]);
 
     if (aqResult.status !== 'fulfilled' || !aqResult.value?.hourly?.time?.length) {
-      // Stale-while-error ONLY for the exact same coordinates/key — never another city
       if (cached) {
         const staleFreshness = evaluateDataFreshness(cached.data.current.timestamp, now(), {
           sourceType: 'modeled',
-          isStaleFallback: true
+          isStaleFallback: true,
+          utcOffsetSeconds: cached.data.location.utcOffsetSeconds
         });
         return {
           ...cached.data,
@@ -209,8 +209,12 @@ export async function fetchAirIntelligence(location, options = {}) {
 
     const times = aq.hourly.time;
     const nowIdx = findCurrentHourIndex(times, aq.current?.time);
+    const utcOffsetSeconds = typeof aq.utc_offset_seconds === 'number'
+      ? aq.utc_offset_seconds
+      : typeof wx?.utc_offset_seconds === 'number'
+        ? wx.utc_offset_seconds
+        : null;
 
-    // Trailing 24h / 8h rolling averages for CPCB compliance
     const trailing24Start = Math.max(0, nowIdx - 23);
     const trailing8Start = Math.max(0, nowIdx - 7);
 
@@ -222,6 +226,19 @@ export async function fetchAirIntelligence(location, options = {}) {
     const coRaw_8h = computeRollingAverage(aq.hourly.carbon_monoxide?.slice(trailing8Start, nowIdx + 1), 8);
     const coMg_8h = coRaw_8h.average !== null ? coUgToMg(coRaw_8h.average) : null;
 
+    const prev24End = trailing24Start;
+    const prev24Start = Math.max(0, prev24End - 24);
+    const prevPm25 = prev24End - prev24Start >= 16
+      ? computeRollingAverage(aq.hourly.pm2_5?.slice(prev24Start, prev24End), 24).average
+      : null;
+
+    const currentPm25 = sanitizeConcentration(aq.current?.pm2_5, 1);
+    const currentPm10 = sanitizeConcentration(aq.current?.pm10, 1);
+    const currentNo2 = sanitizeConcentration(aq.current?.nitrogen_dioxide, 1);
+    const currentSo2 = sanitizeConcentration(aq.current?.sulphur_dioxide, 1);
+    const currentO3 = sanitizeConcentration(aq.current?.ozone, 1);
+    const currentCoMg = aq.current?.carbon_monoxide != null ? coUgToMg(aq.current.carbon_monoxide) : null;
+
     const cpcbEvaluation = calculateCpcbAqi(
       {
         pm25: pm25_24h.average,
@@ -229,6 +246,7 @@ export async function fetchAirIntelligence(location, options = {}) {
         no2: no2_24h.average,
         so2: so2_24h.average,
         o3: o3_8h.average,
+        o3_1h: currentO3,
         co: coMg_8h
       },
       { sourceType: 'modeled', averagingValidated: pm25_24h.average !== null }
@@ -242,7 +260,6 @@ export async function fetchAirIntelligence(location, options = {}) {
     const isEuropeDomain = lat >= 30 && lat <= 72 && lon >= -25 && lon <= 45;
     const gridResolution = isEuropeDomain ? '~11 km (CAMS Europe domain)' : '~40 km (CAMS Global 0.4° domain)';
 
-    // Next 24-hour forecast points
     const forecastPoints = [];
     for (let i = nowIdx; i < Math.min(times.length, nowIdx + 24); i++) {
       const t = times[i];
@@ -262,12 +279,10 @@ export async function fetchAirIntelligence(location, options = {}) {
       });
     }
 
-    // Match today's sunrise/sunset from daily weather array
     const todayDatePrefix = (aq.current?.time || times[nowIdx] || '').slice(0, 10);
     const sunriseIso = wx?.daily?.sunrise?.find((s) => s.startsWith(todayDatePrefix)) || wx?.daily?.sunrise?.[0] || null;
     const sunsetIso = wx?.daily?.sunset?.find((s) => s.startsWith(todayDatePrefix)) || wx?.daily?.sunset?.[0] || null;
 
-    const currentPm25 = sanitizeConcentration(aq.current?.pm2_5, 1);
     const dispersion = analyzeDispersionForecast(forecastPoints, {
       sunriseIso,
       sunsetIso,
@@ -275,8 +290,6 @@ export async function fetchAirIntelligence(location, options = {}) {
       gridResolution
     });
 
-    // Exact historical slice: pastDays * 24 hours ending at nowIdx (fixes 32-point 24h overrun)
-    // Preserves null slots explicitly so charts render visible missing-data gaps
     const targetHistoryHours = pastDays * 24;
     const histStart = Math.max(0, nowIdx - (targetHistoryHours - 1));
     const historyPoints = [];
@@ -290,14 +303,18 @@ export async function fetchAirIntelligence(location, options = {}) {
 
     const retrievalIso = new Date(now()).toISOString();
     const measurementIso = aq.current?.time || times[nowIdx] || null;
-    const freshnessState = evaluateDataFreshness(measurementIso, now(), { sourceType: 'modeled' });
+    const freshnessState = evaluateDataFreshness(measurementIso, now(), {
+      sourceType: 'modeled',
+      utcOffsetSeconds
+    });
 
     const locMeta = {
       name: sanitizeText(location.name, 60) || 'Selected Location',
       region: sanitizeText(location.region, 80) || `${lat}°, ${lon}°`,
       lat,
       lon,
-      timezone: aq.timezone || 'UTC'
+      timezone: aq.timezone || 'UTC',
+      utcOffsetSeconds
     };
 
     const readings = [
@@ -315,11 +332,11 @@ export async function fetchAirIntelligence(location, options = {}) {
       current: {
         timestamp: measurementIso,
         pm25: currentPm25,
-        pm10: sanitizeConcentration(aq.current?.pm10, 1),
-        no2: sanitizeConcentration(aq.current?.nitrogen_dioxide, 1),
-        so2: sanitizeConcentration(aq.current?.sulphur_dioxide, 1),
-        o3: sanitizeConcentration(aq.current?.ozone, 1),
-        coMg: aq.current?.carbon_monoxide != null ? coUgToMg(aq.current.carbon_monoxide) : null,
+        pm10: currentPm10,
+        no2: currentNo2,
+        so2: currentSo2,
+        o3: currentO3,
+        coMg: currentCoMg,
         usAqi: sanitizeConcentration(aq.current?.us_aqi, 0),
         tempC: typeof wx?.current?.temperature_2m === 'number' ? Number(wx.current.temperature_2m.toFixed(1)) : null,
         rhPct: typeof wx?.current?.relative_humidity_2m === 'number' ? Math.round(wx.current.relative_humidity_2m) : null,
@@ -332,7 +349,16 @@ export async function fetchAirIntelligence(location, options = {}) {
         no2_24h: no2_24h.average,
         so2_24h: so2_24h.average,
         o3_8h: o3_8h.average,
-        coMg_8h
+        coMg_8h,
+        yesterdayPm25_24h: prevPm25
+      },
+      pollutantTrends: {
+        pm25: computeSimpleTrend(currentPm25, pm25_24h.average),
+        pm10: computeSimpleTrend(currentPm10, pm10_24h.average),
+        no2: computeSimpleTrend(currentNo2, no2_24h.average),
+        so2: computeSimpleTrend(currentSo2, so2_24h.average),
+        o3: computeSimpleTrend(currentO3, o3_8h.average),
+        co: computeSimpleTrend(currentCoMg, coMg_8h)
       },
       cpcb: cpcbEvaluation,
       dispersion,
@@ -347,7 +373,7 @@ export async function fetchAirIntelligence(location, options = {}) {
         sourceType: 'Modeled Atmospheric Grid (Not Ground Station)',
         gridResolution,
         temporalResolution: 'Hourly model valid steps (12-hr CAMS cycle)',
-        averagingNote: 'CPCB-derived index uses 24-hr rolling means (PM2.5/PM10/NO₂/SO₂) and 8-hr rolling means (O₃/CO).',
+        averagingNote: 'CPCB-derived index uses 24-hr rolling means (PM2.5/PM10/NO₂/SO₂) and 8-hr rolling means (O₃/CO; 1-hr O₃ above 208 µg/m³).',
         fetchedAt: retrievalIso,
         freshness: freshnessState.label,
         freshnessState,

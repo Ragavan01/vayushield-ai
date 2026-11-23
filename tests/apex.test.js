@@ -46,13 +46,11 @@ test('APEX Data Export: buildHistoricalCsv neutralizes spreadsheet formula injec
   const lines = csv.split('\n');
   assert.equal(lines.length, 3);
   assert.match(lines[0], /timestamp_local,location,pm25_ug_m3,pm10_ug_m3/);
-  // Formula payload must be neutralized with leading single quote inside CSV cell
   assert.match(lines[1], /"'=CMD\|calc!A0"/);
-  // Missing point stays empty rather than fabricated zero
   assert.match(lines[2], /,,"/);
 });
 
-test('APEX AI Coach & Design System: 6 templates, 5-tier Liquid Glass tokens, fallbacks, AQI gauge & mobile dock', () => {
+test('APEX 2.0 Visual, Performance & Honesty Audit: GPU-safe Liquid Glass, capsule nav, IAQ blueprint/curve & demo separation', () => {
   assert.equal(COACH_PROMPT_TEMPLATES.length, 6);
 
   const css = fs.readFileSync(path.join(ROOT, 'styles/main.css'), 'utf8');
@@ -62,7 +60,9 @@ test('APEX AI Coach & Design System: 6 templates, 5-tier Liquid Glass tokens, fa
   assert.match(css, /--glass-04-bg/);
   assert.match(css, /--glass-05-bg/);
   assert.match(css, /@supports\s*\(backdrop-filter:/);
+  assert.match(css, /\.header-capsule/);
   assert.match(css, /\.mobile-bottom-nav/);
+  assert.equal(/background-attachment:\s*fixed/i.test(css), false, 'Avoid scroll-jank background-attachment: fixed');
 
   const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
   assert.match(html, /id="aqi-arc-fill"/);
@@ -72,5 +72,18 @@ test('APEX AI Coach & Design System: 6 templates, 5-tier Liquid Glass tokens, fa
   assert.match(html, /id="btn-share-summary"/);
   assert.match(html, /id="btn-reset-profile"/);
   assert.match(html, /id="btn-clear-chat"/);
+  assert.match(html, /id="iaq-mode-select"/);
+  assert.match(html, /id="iaq-filter-select"/);
+  assert.match(html, /id="iaq-room-blueprint"/);
+  assert.match(html, /id="iaq-curve-chart"/);
+  assert.match(html, /id="iaq-ref-notice"/);
+  assert.match(html, /id="imp-ref-notice"/);
+  assert.match(html, /<label[^>]*for="iaq-mode-select"/);
+  assert.match(html, /<label[^>]*for="iaq-filter-select"/);
   assert.match(html, /class="mobile-bottom-nav"/);
+
+  const appJs = fs.readFileSync(path.join(ROOT, 'js/app.js'), 'utf8');
+  assert.match(appJs, /Illustrative Example/);
+  assert.match(appJs, /Saved on This Device/);
+  assert.match(appJs, /Not in CAMS model/);
 });

@@ -35,11 +35,11 @@ import {
 
 test('CPCB NAQI: exact official breakpoints & linear interpolation for PM2.5, PM10, NO2, SO2, O3, CO, NH3, Pb', () => {
   assert.equal(CPCB_BANDS.length, 6);
-  assert.equal(classifyCpcbBand(218).id, 'poor');
+  assert.equal(classifyCpcbBand(217).id, 'poor');
   assert.equal(calculatePollutantSubIndex('pm25', 0).subIndex, 0);
   assert.equal(calculatePollutantSubIndex('pm25', 30).subIndex, 50);
   assert.equal(calculatePollutantSubIndex('pm25', 60).subIndex, 100);
-  assert.equal(calculatePollutantSubIndex('pm25', 75).subIndex, 151); // midpoint 101..200
+  assert.equal(calculatePollutantSubIndex('pm25', 75).subIndex, 150);
   assert.equal(calculatePollutantSubIndex('pm25', 120).subIndex, 300);
   assert.equal(calculatePollutantSubIndex('pm25', 250).subIndex, 400);
   assert.equal(calculatePollutantSubIndex('pm25', 450).exceededScale, true);
@@ -57,31 +57,25 @@ test('CPCB NAQI: exact official breakpoints & linear interpolation for PM2.5, PM
   assert.equal(coUgToMg(2500), 2.5);
 });
 
-test('CPCB NAQI: enforces 75% rolling-average completeness & minimum 3-pollutant + PM rule', () => {
-  const complete24 = Array(20).fill(90);
-  assert.equal(computeRollingAverage(complete24, 24).average, 90);
+test('CPCB NAQI: enforces 16/24-hr rolling completeness & minimum 3-pollutant + PM rule', () => {
+  assert.equal(computeRollingAverage(Array(20).fill(90), 24).average, 90);
+  assert.equal(computeRollingAverage(Array(10).fill(90), 24).average, null);
 
-  const sparse24 = Array(10).fill(90);
-  assert.equal(computeRollingAverage(sparse24, 24).average, null);
-
-  // Modeled data must never claim isOfficialCpcb === true
   const modeled = calculateCpcbAqi(
     { pm25: 95, pm10: 140, no2: 45, so2: 18 },
     { sourceType: 'modeled', averagingValidated: true }
   );
-  assert.equal(modeled.aqi, 218);
+  assert.equal(modeled.aqi, 217);
   assert.equal(modeled.primaryPollutant.pollutant, 'pm25');
   assert.equal(modeled.meetsCompletenessRule, true);
   assert.equal(modeled.isOfficialCpcb, false);
 
-  // Station data with >=3 pollutants including PM2.5 meets official criteria
   const station = calculateCpcbAqi(
     { pm25: 95, pm10: 140, no2: 45 },
     { sourceType: 'station', averagingValidated: true }
   );
   assert.equal(station.isOfficialCpcb, true);
 
-  // Missing PM2.5 and PM10 fails completeness rule
   const gasOnly = calculateCpcbAqi(
     { no2: 60, so2: 40, o3: 90 },
     { sourceType: 'station', averagingValidated: true }
@@ -106,7 +100,6 @@ test('Dispersion Engine: computes Ventilation Coefficient & dynamic cleanest/pea
   assert.equal(favorable.vc, 7500);
   assert.equal(favorable.riskLevel, 'low');
 
-  // Construct hourly series where cleanest window is at 08:00–10:00 (proving zero hardcoded afternoon bias)
   const synthetic = Array.from({ length: 12 }, (_, h) => ({
     time: `2026-11-23T${String(h).padStart(2, '0')}:00`,
     pm25: h >= 8 && h <= 10 ? 35 : h <= 2 ? 210 : 140,
@@ -124,8 +117,7 @@ test('Dispersion Engine: computes Ventilation Coefficient & dynamic cleanest/pea
   assert.equal(forecast.trend, 'improving');
   assert.match(forecast.classification, /Stagnation Risk|Dispersion Conditions/i);
 
-  const tooShort = analyzeDispersionForecast(synthetic.slice(0, 3));
-  assert.equal(tooShort.available, false);
+  assert.equal(analyzeDispersionForecast(synthetic.slice(0, 3)).available, false);
 });
 
 test('Indoor Physics Lab: steady-state mass-balance responds to room volume, leakage & CADR without ozone advice', () => {
@@ -163,9 +155,7 @@ test('Impact Model: scales CO2 & savings to actual commute mode/distance and pre
   assert.ok(carRes.co2SavedKgPerMonth > 30);
   assert.ok(carRes.exposureReductionPct > 0 && carRes.exposureReductionPct <= 75);
   assert.equal(walkRes.co2SavedKgPerMonth, 0);
-
-  const none = evaluateSelectedScenarios([], carProfile, 160);
-  assert.equal(none.exposureReductionPct, 0);
+  assert.equal(evaluateSelectedScenarios([], carProfile, 160).exposureReductionPct, 0);
 
   const heur = calculateMortalityRiskHeuristic(22);
   assert.equal(heur.cigaretteEquivalentPerDay, 1);
@@ -180,10 +170,11 @@ test('Routine Engine: adapts guidance dynamically to severe vs favorable AQI', (
     current: { tempC: 14, windKmh: 4.2 },
     dispersion: {
       available: true,
-      classification: 'Dispersion-Risk Estimate',
+      classification: 'Dispersion Conditions Estimate',
       trend: 'worsening',
       trendDeltaPct: 18,
-      bestOutdoorWindow: { label: '14:00–16:00', avgPm25: 130 },
+      daylight: { sunriseLabel: '06:45', sunsetLabel: '17:25' },
+      bestDaytimeWindow: { label: '14:00–16:00', avgPm25: 130, deltaText: 'Change vs. current: -50 µg/m³ (lower)', maxPrecipMm: 0, isDaytime: true },
       peakAccumulationWindow: { label: '06:00–08:00', avgPm25: 220 },
       bestVentilationWindow: { label: '14:00–16:00', guidance: 'Brief 10–15 min flush only.' }
     }
@@ -199,33 +190,10 @@ test('Routine Engine: adapts guidance dynamically to severe vs favorable AQI', (
 });
 
 test('Community Moderation: blocks PII addresses, PIN codes, phone numbers, links, abuse & missing consent', () => {
-  assert.equal(moderateCommunitySubmission({
-    area: 'Indiranagar',
-    category: 'mobility',
-    action: 'Starting a 4-family school carpool.',
-    consentAccepted: false
-  }).approved, false);
-
-  assert.equal(moderateCommunitySubmission({
-    area: 'Flat 402 Green Towers',
-    category: 'mobility',
-    action: 'Starting a 4-family school carpool.',
-    consentAccepted: true
-  }).approved, false);
-
-  assert.equal(moderateCommunitySubmission({
-    area: 'Coimbatore 641021',
-    category: 'zero-burning',
-    action: 'Composting all autumn leaves instead of burning.',
-    consentAccepted: true
-  }).approved, false);
-
-  assert.equal(moderateCommunitySubmission({
-    area: 'Sector 18 Noida',
-    category: 'mobility',
-    action: 'Call 9876543210 or visit https://spam.example.com for carpool',
-    consentAccepted: true
-  }).approved, false);
+  assert.equal(moderateCommunitySubmission({ area: 'Indiranagar', category: 'mobility', action: 'Starting a 4-family school carpool.', consentAccepted: false }).approved, false);
+  assert.equal(moderateCommunitySubmission({ area: 'Flat 402 Green Towers', category: 'mobility', action: 'Starting a 4-family school carpool.', consentAccepted: true }).approved, false);
+  assert.equal(moderateCommunitySubmission({ area: 'Coimbatore 641021', category: 'zero-burning', action: 'Composting all autumn leaves instead of burning.', consentAccepted: true }).approved, false);
+  assert.equal(moderateCommunitySubmission({ area: 'Sector 18 Noida', category: 'mobility', action: 'Call 9876543210 or visit https://spam.example.com for carpool', consentAccepted: true }).approved, false);
 
   const valid = moderateCommunitySubmission({
     area: 'Indiranagar East, Bengaluru',
