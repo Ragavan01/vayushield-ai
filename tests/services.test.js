@@ -215,7 +215,8 @@ test('Geocoding & AI Coach Client: resolves presets and falls back transparently
     null
   );
   assert.equal(fallback.isFallback, true);
-  assert.ok(fallback.assumptionsAndLimits.length >= 2);
+assert.match(fallback.directAnswer, /13:00–15:00/);
+assert.ok(fallback.assumptionsAndLimits.length >= 1);
 
   const clientOut = await askVayuShieldCoach(
     {

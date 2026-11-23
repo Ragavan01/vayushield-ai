@@ -1061,6 +1061,23 @@ function formatCoachPlainText(res) {
   ].join('\n');
 }
 
+function formatCoachPlainText(res) {
+  return [
+    res.headline,
+    res.directAnswer || res.indoorGuidance || '',
+    '',
+    ...(res.recommendations || []).length
+      ? ['Recommended Steps:', ...res.recommendations.map((r) => `- ${r}`), '']
+      : [],
+    ...(res.factsUsed || []).length
+      ? ['Data Basis:', ...res.factsUsed.map((f) => `- ${f}`), '']
+      : [],
+    ...(res.assumptionsAndLimits || []).length
+      ? ['Limits:', ...res.assumptionsAndLimits.map((a) => `- ${a}`)]
+      : []
+  ].filter((line, i, arr) => line !== '' || arr[i - 1] !== '').join('\n');
+}
+
 function renderCoachThread() {
   const out = document.getElementById('coach-output');
   clearNode(out);
@@ -1072,16 +1089,6 @@ function renderCoachThread() {
     }));
     return;
   }
-
-  const makeListSection = (title, items) => createSafeElement(document, 'div', {
-    children: [
-      createSafeElement(document, 'h4', { className: 'coach-section-title', text: title }),
-      createSafeElement(document, 'ul', {
-        className: 'coach-list',
-        children: (items || []).map((t) => createSafeElement(document, 'li', { text: t }))
-      })
-    ]
-  });
 
   for (const turn of state.coachHistory) {
     out.appendChild(createSafeElement(document, 'div', {
@@ -1124,35 +1131,52 @@ function renderCoachThread() {
     });
     retryBtn.addEventListener('click', () => handleCoachSubmit(turn.question));
 
-    const card = createSafeElement(document, 'article', {
-      className: 'coach-card',
+    const children = [
+      createSafeElement(document, 'h3', { className: 'panel-title', text: res.headline }),
+      createSafeElement(document, 'p', {
+        className: 'routine-action',
+        text: res.directAnswer || res.indoorGuidance || ''
+      })
+    ];
+
+    if (Array.isArray(res.recommendations) && res.recommendations.length > 0) {
+      children.push(createSafeElement(document, 'div', {
+        children: [
+          createSafeElement(document, 'h4', { className: 'coach-section-title', text: 'Actionable Guidance' }),
+          createSafeElement(document, 'ul', {
+            className: 'coach-list',
+            children: res.recommendations.map((t) => createSafeElement(document, 'li', { text: t }))
+          })
+        ]
+      }));
+    }
+
+    const metaNotes = [...(res.factsUsed || []), ...(res.assumptionsAndLimits || [])];
+    if (metaNotes.length > 0) {
+      children.push(createSafeElement(document, 'p', {
+        className: 'mono-meta',
+        text: metaNotes.join(' · ')
+      }));
+    }
+
+    children.push(createSafeElement(document, 'div', {
+      className: 'coach-card-footer',
       children: [
-        createSafeElement(document, 'h3', { className: 'panel-title', text: res.headline }),
-        makeListSection('Telemetry & Facts Used', res.factsUsed),
-        makeListSection('Evidence-Based Recommendations', res.recommendations),
-        createSafeElement(document, 'div', {
-          children: [
-            createSafeElement(document, 'h4', { className: 'coach-section-title', text: 'Indoor Air & Filtration Guidance' }),
-            createSafeElement(document, 'p', { className: 'routine-action', text: res.indoorGuidance })
-          ]
+        createSafeElement(document, 'span', {
+          className: `badge ${res.isFallback ? 'badge-warn' : 'badge-teal'}`,
+          text: res.engine
         }),
-        makeListSection('Assumptions, Uncertainties & Limits', res.assumptionsAndLimits),
         createSafeElement(document, 'div', {
-          className: 'coach-card-footer',
-          children: [
-            createSafeElement(document, 'span', {
-              className: `badge ${res.isFallback ? 'badge-warn' : 'badge-teal'}`,
-              text: res.engine
-            }),
-            createSafeElement(document, 'div', {
-              className: 'action-group',
-              children: [copyBtn, retryBtn]
-            })
-          ]
+          className: 'action-group',
+          children: [copyBtn, retryBtn]
         })
       ]
-    });
-    out.appendChild(card);
+    }));
+
+    out.appendChild(createSafeElement(document, 'article', {
+      className: 'coach-card',
+      children
+    }));
   }
 }
 

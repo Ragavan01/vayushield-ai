@@ -1,17 +1,22 @@
 /**
  * @fileoverview Hardened Vercel Serverless Proxy for Google Gemini 2.5 Flash.
- * Strictly server-side GEMINI_API_KEY only, null-safe metric serialization
- * (never turns missing pollutants into 0), and bounded sliding-window IP rate limiter.
+ * Fixes:
+ * - Sets thinkingConfig: { thinkingBudget: 0 } + maxOutputTokens: 1400 so gemini-2.5-flash
+ *   never exhausts tokens on hidden thoughts and truncates JSON output.
+ * - Automatic model fallback chain (gemini-2.5-flash -> gemini-2.0-flash) on transient errors.
+ * - Question-specific JSON schema (directAnswer, actionableSteps, dataBasis, caveat)
+ *   so every prompt receives a distinct, grounded answer rather than boilerplate.
+ * - Never coerces missing/null telemetry into zero.
  */
 
 import { clampNumber, sanitizeText } from '../js/core/security.js';
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODELS = Object.freeze(['gemini-2.5-flash', 'gemini-2.0-flash']);
 const MAX_BODY_BYTES = 18_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 15;
 const MAX_TRACKED_IPS = 2_000;
-const UPSTREAM_TIMEOUT_MS = 12_000;
+const UPSTREAM_TIMEOUT_MS = 14_000;
 
 const ipRequestLog = new Map();
 
@@ -53,34 +58,36 @@ function fmtMetric(val, unit = '') {
 
 export function buildScientificPrompt(ctx) {
   return [
-    'You are VayuShield, an evidence-based Urban Air Quality and Atmospheric Dispersion Assistant.',
-    'CRITICAL SCIENTIFIC & AI RULES:',
-    '1. Never invent pollutant readings, station names, citations, or medical diagnoses.',
-    '2. Never treat "Unavailable" fields as zero. If a metric is missing, state explicitly that it is unavailable.',
-    '3. Clearly distinguish modeled atmospheric estimates, deterministic calculations, assumptions, and recommendations.',
-    '4. Never pretend a modeled forecast is a direct ground monitoring-station observation.',
+    'You are VayuShield AI, an evidence-based Urban Air Quality and Atmospheric Dispersion Assistant.',
+    'STRICT OPERATING RULES:',
+    '1. Directly answer the exact User Question below first. If the user says "hi" or greets you, greet them warmly in 1 sentence, summarize the active city AQI status in 1 sentence, and suggest 2 specific environmental questions they can ask.',
+    '2. Never repeat generic boilerplate across different questions—tailor every point specifically to what the user asked.',
+    '3. Never invent pollutant readings, station names, citations, or medical diagnoses.',
+    '4. Never treat "Unavailable" fields as zero. Distinguish modeled grid estimates from direct station measurements.',
     '5. Never recommend ozone-generating ionizers; distinguish True HEPA particle capture from gas/VOC removal.',
     '',
     'Return ONLY a valid JSON object matching this exact schema:',
     '{',
-    '  "headline": "concise 1-line grounded summary",',
-    '  "factsUsed": ["2-3 exact numbers/timestamps from the provided telemetry context with source type"],',
-    '  "recommendations": ["3 specific, practical steps tailored to the household profile and dispersion trend"],',
-    '  "indoorGuidance": "specific room filtration / ventilation advice grounded in provided room CADR and filter efficiency",',
-    '  "assumptionsAndLimits": ["1-2 explicit uncertainties or missing inputs (e.g., model grid resolution, missing NH3/Pb, no medical diagnosis)"]',
+    '  "headline": "short 5-10 word title specific to the user question",',
+    '  "directAnswer": "2-4 clear, natural sentences directly answering the user question using exact numbers from the context",',
+    '  "recommendations": ["2-3 concise, practical steps directly relevant to the user question"],',
+    '  "factsUsed": ["1-2 exact telemetry or physics figures backing this answer, noting modeled vs calculated source"],',
+    '  "assumptionsAndLimits": ["1 concise sentence stating key uncertainty or limitation (e.g., ~40 km CAMS grid, not medical advice)"]',
     '}',
     '',
-    'Validated Telemetry & Profile Context:',
+    'Validated Telemetry & Household Context:',
     `- Location: ${ctx.city} (${ctx.lat}, ${ctx.lon}) · Local Valid Timestamp: ${ctx.measurementTime}`,
     `- Data Source Type: ${ctx.sourceType}`,
     `- CPCB-Derived AQI Estimate: ${fmtMetric(ctx.aqi)} (${ctx.aqiBand}), Primary Pollutant: ${ctx.primaryPollutant}`,
     `- 24h Rolling PM2.5: ${fmtMetric(ctx.pm25, 'ug/m3')} | Prior 24h (Yesterday) PM2.5: ${fmtMetric(ctx.yesterdayPm25, 'ug/m3')}`,
     `- 24h PM10: ${fmtMetric(ctx.pm10, 'ug/m3')}, 24h NO2: ${fmtMetric(ctx.no2, 'ug/m3')}, 24h SO2: ${fmtMetric(ctx.so2, 'ug/m3')}`,
     `- 8h O3: ${fmtMetric(ctx.o3, 'ug/m3')}, 8h CO: ${fmtMetric(ctx.coMg, 'mg/m3')}, NH3 & Pb: Unavailable in CAMS model`,
-    `- Dispersion Trend: ${ctx.trend}, Best Practical Daytime Window: ${ctx.bestWindow}`,
-    `- Household Profile: ${ctx.householdProfile}, Commute: ${ctx.commuteMode} (${ctx.dailyCommuteKm} km/day)`,
-    `- Room Volume/CADR Target: ${ctx.roomSqFt} sq.ft (Recommended CADR: ${fmtMetric(ctx.recommendedCadr, 'm3/h')}), Cooking: ${ctx.cookingFuel}`,
-    `- User Question: ${ctx.question}`
+    `- Dispersion & Wind: BLH ${fmtMetric(ctx.blh, 'm')}, Wind ${fmtMetric(ctx.windKmh, 'km/h')}, VC ${fmtMetric(ctx.vc, 'm2/s')}, 6h Trend: ${ctx.trend}`,
+    `- Best Practical Daytime Window: ${ctx.bestWindow} (Projected PM2.5: ${fmtMetric(ctx.bestWindowPm25, 'ug/m3')}) | Peak Accumulation Window: ${ctx.peakWindow}`,
+    `- Household Profile: ${ctx.householdProfile}, Commute: ${ctx.commuteMode} (${ctx.dailyCommuteKm} km/day), Cooking: ${ctx.cookingFuel}`,
+    `- Room Physics: ${ctx.roomSqFt} sq.ft (${fmtMetric(ctx.roomVolumeM3, 'm3')}), Recommended CADR: ${fmtMetric(ctx.recommendedCadr, 'm3/h')}, Unfiltered Indoor PM2.5: ${fmtMetric(ctx.unfilteredIndoorPm25, 'ug/m3')} -> Filtered: ${fmtMetric(ctx.filteredIndoorPm25, 'ug/m3')}`,
+    '',
+    `User Question: "${ctx.question}"`
   ].join('\n');
 }
 
@@ -88,18 +95,22 @@ export function parseStructuredCoachResponse(rawText) {
   const cleaned = String(rawText || '').replace(/```json/gi, '').replace(/```/g, '').trim();
   const parsed = JSON.parse(cleaned);
 
-  const toCleanList = (arr, limit = 4) => (
+  const toCleanList = (arr, limit = 3) => (
     Array.isArray(arr)
-      ? arr.map((item) => sanitizeText(item, 240)).filter(Boolean).slice(0, limit)
+      ? arr.map((item) => sanitizeText(item, 260)).filter(Boolean).slice(0, limit)
       : []
   );
 
+  const headline = sanitizeText(parsed.headline, 140) || 'Grounded Air Quality Insight';
+  const directAnswer = sanitizeText(parsed.directAnswer || parsed.indoorGuidance, 600) || headline;
+
   return {
-    headline: sanitizeText(parsed.headline, 180) || 'Grounded Air Quality Guidance',
+    headline,
+    directAnswer,
     factsUsed: toCleanList(parsed.factsUsed, 3),
-    recommendations: toCleanList(parsed.recommendations, 4),
-    indoorGuidance: sanitizeText(parsed.indoorGuidance, 340),
-    assumptionsAndLimits: toCleanList(parsed.assumptionsAndLimits, 3)
+    recommendations: toCleanList(parsed.recommendations, 3),
+    indoorGuidance: sanitizeText(parsed.indoorGuidance, 340) || directAnswer,
+    assumptionsAndLimits: toCleanList(parsed.assumptionsAndLimits, 2)
   };
 }
 
@@ -118,27 +129,28 @@ export function createGeminiHandler(deps = {}) {
 
     const clientIp = String(req.headers?.['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
     if (!checkRateLimit(clientIp, now())) {
-      return res.status(429).json({ error: 'Rate limit exceeded. Please wait 60 seconds.' });
+      return res.status(429).json({ error: 'Rate limit exceeded. Please wait 60 seconds.', diagnosticCode: 'RATE_LIMITED' });
     }
 
     const body = req.body && typeof req.body === 'object' ? req.body : null;
     if (!body) {
-      return res.status(400).json({ error: 'Invalid JSON request body.' });
+      return res.status(400).json({ error: 'Invalid JSON request body.', diagnosticCode: 'BAD_REQUEST' });
     }
     if (JSON.stringify(body).length > MAX_BODY_BYTES) {
-      return res.status(413).json({ error: 'Payload exceeds maximum allowed size.' });
+      return res.status(413).json({ error: 'Payload exceeds maximum allowed size.', diagnosticCode: 'PAYLOAD_TOO_LARGE' });
     }
 
     const apiKey = typeof env.GEMINI_API_KEY === 'string' ? env.GEMINI_API_KEY.trim() : '';
     if (!apiKey) {
       return res.status(503).json({
-        error: 'Server-side GEMINI_API_KEY is not configured.',
+        error: 'Server-side GEMINI_API_KEY is not configured in Vercel Environment Variables.',
+        diagnosticCode: 'MISSING_GEMINI_API_KEY',
         fallbackRecommended: true
       });
     }
 
     const ctx = {
-      question: sanitizeText(body.question, 360) || 'What precautions should my household take based on current air quality?',
+      question: sanitizeText(body.question, 360) || 'Explain my current air quality.',
       city: sanitizeText(body.city, 80) || 'Selected Location',
       lat: Number(clampNumber(body.lat, -90, 90, 0).toFixed(3)),
       lon: Number(clampNumber(body.lon, -180, 180, 0).toFixed(3)),
@@ -154,61 +166,83 @@ export function createGeminiHandler(deps = {}) {
       so2: parseNullableMetric(body.so2, 0, 2500, 1),
       o3: parseNullableMetric(body.o3, 0, 1000, 1),
       coMg: parseNullableMetric(body.coMg, 0, 60, 2),
+      blh: parseNullableMetric(body.blh, 10, 6000, 0),
+      windKmh: parseNullableMetric(body.windKmh, 0, 250, 1),
+      vc: parseNullableMetric(body.vc, 0, 200000, 0),
       trend: sanitizeText(body.trend, 24) || 'unavailable',
       bestWindow: sanitizeText(body.bestWindow, 32) || 'Unavailable',
+      bestWindowPm25: parseNullableMetric(body.bestWindowPm25, 0, 600, 1),
+      peakWindow: sanitizeText(body.peakWindow, 32) || 'Unavailable',
       householdProfile: sanitizeText(body.householdProfile, 32) || 'multi-gen',
       commuteMode: sanitizeText(body.commuteMode, 32) || 'two-wheeler',
       dailyCommuteKm: Math.round(clampNumber(body.dailyCommuteKm, 0, 120, 18)),
       roomSqFt: Math.round(clampNumber(body.roomSqFt, 60, 2000, 220)),
-      recommendedCadr: parseNullableMetric(body.recommendedCadr, 100, 2000, 0),
+      roomVolumeM3: parseNullableMetric(body.roomVolumeM3, 10, 1000, 1),
+      recommendedCadr: parseNullableMetric(body.recommendedCadr, 50, 2000, 0),
+      unfilteredIndoorPm25: parseNullableMetric(body.unfilteredIndoorPm25, 0, 600, 1),
+      filteredIndoorPm25: parseNullableMetric(body.filteredIndoorPm25, 0, 600, 1),
       cookingFuel: sanitizeText(body.cookingFuel, 32) || 'lpg-no-chimney'
     };
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+    const promptText = buildScientificPrompt(ctx);
+    let lastDiagnostic = 'UPSTREAM_ERROR';
 
-    try {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-      const upstream = await fetchImpl(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: buildScientificPrompt(ctx) }] }],
-          generationConfig: {
-            temperature: 0.2,
-            maxOutputTokens: 780,
-            responseMimeType: 'application/json'
-          }
-        })
-      });
+    for (const modelName of GEMINI_MODELS) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
-      if (!upstream.ok) {
-        return res.status(502).json({
-          error: 'Upstream Gemini service unavailable.',
-          fallbackRecommended: true
+      try {
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+        const generationConfig = {
+          temperature: 0.25,
+          maxOutputTokens: 1400,
+          responseMimeType: 'application/json'
+        };
+        if (modelName.startsWith('gemini-2.5')) {
+          generationConfig.thinkingConfig = { thinkingBudget: 0 };
+        }
+
+        const upstream = await fetchImpl(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: promptText }] }],
+            generationConfig
+          })
         });
+
+        if (!upstream.ok) {
+          lastDiagnostic = `UPSTREAM_HTTP_${upstream.status}`;
+          if ([404, 429, 500, 502, 503].includes(upstream.status)) {
+            continue;
+          }
+          break;
+        }
+
+        const data = await upstream.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const structured = parseStructuredCoachResponse(text);
+
+        return res.status(200).json({
+          engine: `${modelName === 'gemini-2.5-flash' ? 'Google Gemini 2.5 Flash' : 'Google Gemini 2.0 Flash'} (Server-Side Proxy)`,
+          ...structured
+        });
+      } catch (err) {
+        lastDiagnostic = err?.name === 'AbortError' ? 'UPSTREAM_TIMEOUT' : 'RESPONSE_PARSE_ERROR';
+      } finally {
+        clearTimeout(timeoutId);
       }
-
-      const data = await upstream.json();
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const structured = parseStructuredCoachResponse(text);
-
-      return res.status(200).json({
-        engine: 'Google Gemini 2.5 Flash (Server-Side Proxy)',
-        ...structured
-      });
-    } catch {
-      return res.status(504).json({
-        error: 'Gemini request timed out or returned invalid JSON.',
-        fallbackRecommended: true
-      });
-    } finally {
-      clearTimeout(timeoutId);
     }
+
+    return res.status(502).json({
+      error: `Gemini proxy fallback triggered (${lastDiagnostic}).`,
+      diagnosticCode: lastDiagnostic,
+      fallbackRecommended: true
+    });
   };
 }
 
