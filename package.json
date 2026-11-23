@@ -1,24 +1,15 @@
 {
   "name": "vayushield-ai",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "description": "VayuShield — Scientific urban air quality intelligence, atmospheric dispersion forecasting, indoor filtration physics, and server-proxied Gemini guidance.",
   "type": "module",
-  "description": "VayuShield AI — GenAI Urban Air Quality & Winter Smog Assistant for Families and Communities",
-  "scripts": {
-    "test": "node --test tests/core.test.js tests/security.test.js tests/services.test.js tests/accessibility.test.js",
-    "check:syntax": "node --check js/core/security.js && node --check js/core/aqiEngine.js && node --check js/core/recommendationEngine.js && node --check js/services/airQualityService.js && node --check js/services/aiAssistantService.js && node --check js/app.js && node --check api/gemini.js",
-    "verify": "npm run check:syntax && npm test"
-  },
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": [
-    "genai",
-    "google-gemini",
-    "air-quality",
-    "aqi",
-    "sustainability",
-    "winter-smog",
-    "accessibility"
-  ],
-  "license": "MIT"
+  "scripts": {
+    "check:syntax": "node --check js/core/security.js && node --check js/core/cpcbAqi.js && node --check js/core/dispersionEngine.js && node --check js/core/indoorPhysics.js && node --check js/core/impactModel.js && node --check js/core/routineEngine.js && node --check js/core/communityModeration.js && node --check js/services/airQualityService.js && node --check js/services/aiAssistantService.js && node --check js/app.js && node --check api/gemini.js",
+    "test": "node --test tests/core.test.js tests/security.test.js tests/services.test.js tests/accessibility.test.js",
+    "verify": "npm run check:syntax && npm test"
+  },
+  "private": true
 }

@@ -1,32 +1,33 @@
 /**
- * @fileoverview Hardened Vercel Serverless Function proxying Google Gemini 2.5 Flash
- * for VayuShield AI. Protects API keys server-side, enforces rate limiting,
- * validates payloads, and strips unsafe markup before returning structured JSON.
+ * @fileoverview Hardened Vercel Serverless Proxy for Google Gemini 2.5 Flash.
+ * Security & scientific guardrails:
+ * - Strictly server-side GEMINI_API_KEY only (never accepts browser-supplied secrets)
+ * - Bounded sliding-window IP rate limiter (prevents unbounded Map memory growth)
+ * - Structured JSON schema forcing explicit separation of facts, assumptions, recommendations & uncertainties
  */
 
-import { classifyAqi } from '../js/core/aqiEngine.js';
-import { clampNumber, isPlausibleApiKey, sanitizeText } from '../js/core/security.js';
+import { clampNumber, sanitizeText } from '../js/core/security.js';
 
 const GEMINI_MODEL = 'gemini-2.5-flash';
-const MAX_BODY_BYTES = 16_000;
+const MAX_BODY_BYTES = 18_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_REQUESTS = 18;
+const RATE_LIMIT_MAX_REQUESTS = 15;
+const MAX_TRACKED_IPS = 2_000;
 const UPSTREAM_TIMEOUT_MS = 12_000;
 
 /** @type {Map<string, number[]>} */
 const ipRequestLog = new Map();
 
-/**
- * Checks whether a client IP is within the sliding-window rate limit.
- * @param {string} ip
- * @param {number} now
- * @returns {boolean}
- */
 export function checkRateLimit(ip, now = Date.now()) {
   const key = sanitizeText(ip || 'unknown', 64) || 'unknown';
   const windowStart = now - RATE_LIMIT_WINDOW_MS;
-  const recent = (ipRequestLog.get(key) || []).filter((ts) => ts > windowStart);
 
+  if (ipRequestLog.size >= MAX_TRACKED_IPS && !ipRequestLog.has(key)) {
+    const oldestKey = ipRequestLog.keys().next().value;
+    if (oldestKey) ipRequestLog.delete(oldestKey);
+  }
+
+  const recent = (ipRequestLog.get(key) || []).filter((ts) => ts > windowStart);
   if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
     ipRequestLog.set(key, recent);
     return false;
@@ -37,75 +38,59 @@ export function checkRateLimit(ip, now = Date.now()) {
   return true;
 }
 
-/**
- * Resets rate limit buckets (used in automated tests).
- */
 export function resetRateLimiter() {
   ipRequestLog.clear();
 }
 
-/**
- * Builds a tightly constrained system + user prompt grounded in the user's live AQI and profile.
- * @param {{ question: string, city: string, aqi: number, pm25: number, commuteMode: string, householdProfile: string, budgetTier: string, cookingFuel: string, roomSqFt: number }} ctx
- * @returns {string}
- */
-export function buildGroundedPrompt(ctx) {
-  const band = classifyAqi(ctx.aqi);
+export function buildScientificPrompt(ctx) {
   return [
-    'You are VayuShield AI, an evidence-based Urban Air Quality & Winter Smog Assistant for families and communities.',
-    'Respond ONLY with a valid JSON object (no markdown fences, no extra prose) matching this exact schema:',
+    'You are VayuShield, an evidence-based Urban Air Quality and Atmospheric Dispersion Assistant.',
+    'STRICT SCIENTIFIC RULES:',
+    '1. Never invent pollutant readings, station names, or medical guarantees.',
+    '2. Explicitly distinguish between modeled atmospheric estimates provided below, general assumptions, and actionable recommendations.',
+    '3. If the provided telemetry is missing a pollutant or vertical radiosonde data, state that limitation explicitly.',
+    '4. Never recommend ozone-generating ionizers; distinguish HEPA particle capture from gas/VOC ventilation or activated carbon.',
+    '',
+    'Return ONLY a valid JSON object matching this exact schema:',
     '{',
-    '  "headline": "concise 1-line summary tailored to the user question and city",',
-    '  "immediateSteps": ["3 specific, actionable low-emission or indoor protection steps"],',
-    '  "indoorHack": "1 practical indoor air quality hack matching their budget and room size",',
-    '  "sustainableSwap": "1 realistic low-emission lifestyle alternative",',
-    '  "directImpact": "clear quantitative explanation of how these choices reduce PM2.5 exposure, CO2, or health risk",',
-    '  "communityTip": "1 neighborhood-level action families can share"',
+    '  "headline": "concise 1-line grounded summary",',
+    '  "factsUsed": ["2-3 exact numbers/conditions from the provided telemetry context with source type"],',
+    '  "recommendations": ["3 specific, practical steps tailored to the household profile and current dispersion trend"],',
+    '  "indoorGuidance": "specific room filtration / ventilation advice grounded in provided room CADR and source type",',
+    '  "assumptionsAndLimits": ["1-2 explicit uncertainties or missing inputs (e.g., 40km model grid vs street level, no medical diagnosis)"]',
     '}',
     '',
-    'Live Context:',
-    `- Location: ${ctx.city}`,
-    `- Current AQI: ${ctx.aqi} (${band.label}), PM2.5: ${ctx.pm25} ug/m3`,
-    `- Household Profile: ${ctx.householdProfile}`,
-    `- Commute Mode: ${ctx.commuteMode}`,
-    `- Budget Tier: ${ctx.budgetTier}`,
-    `- Cooking Setup: ${ctx.cookingFuel}`,
-    `- Primary Room Size: ${ctx.roomSqFt} sq.ft`,
-    `- User Question: ${ctx.question}`,
-    '',
-    'Rules: Be practical, empathetic, medically cautious (never diagnose disease), and quantify direct impact clearly.'
+    'Validated Telemetry & Profile Context:',
+    `- Location: ${ctx.city} (${ctx.lat}, ${ctx.lon})`,
+    `- Data Source Type: ${ctx.sourceType}`,
+    `- CPCB-Derived AQI Estimate: ${ctx.aqi} (${ctx.aqiBand}), Primary Pollutant: ${ctx.primaryPollutant}`,
+    `- 24h Rolling PM2.5: ${ctx.pm25} ug/m3, PM10: ${ctx.pm10} ug/m3, NO2: ${ctx.no2} ug/m3`,
+    `- Dispersion Trend: ${ctx.trend}, Best Forecasted Window: ${ctx.bestWindow}`,
+    `- Household Profile: ${ctx.householdProfile}, Commute: ${ctx.commuteMode} (${ctx.dailyCommuteKm} km/day)`,
+    `- Room Volume/CADR Target: ${ctx.roomSqFt} sq.ft (Recommended CADR: ${ctx.recommendedCadr} m3/h), Cooking: ${ctx.cookingFuel}`,
+    `- User Question: ${ctx.question}`
   ].join('\n');
 }
 
-/**
- * Parses and sanitizes the JSON returned by Gemini so the frontend never receives unsafe HTML or malformed fields.
- * @param {string} rawText
- */
-export function parseSafeGeminiJson(rawText) {
-  const stripped = String(rawText || '')
-    .replace(/```json/gi, '')
-    .replace(/```/g, '')
-    .trim();
+export function parseStructuredCoachResponse(rawText) {
+  const cleaned = String(rawText || '').replace(/```json/gi, '').replace(/```/g, '').trim();
+  const parsed = JSON.parse(cleaned);
 
-  const parsed = JSON.parse(stripped);
-  const steps = Array.isArray(parsed.immediateSteps)
-    ? parsed.immediateSteps.map((s) => sanitizeText(s, 220)).filter(Boolean).slice(0, 4)
-    : [];
+  const toCleanList = (arr, limit = 4) => (
+    Array.isArray(arr)
+      ? arr.map((item) => sanitizeText(item, 240)).filter(Boolean).slice(0, limit)
+      : []
+  );
 
   return {
-    headline: sanitizeText(parsed.headline, 180) || 'Personalized Winter Smog Action Plan',
-    immediateSteps: steps.length ? steps : ['Check afternoon ventilation window and seal room gaps during evening inversion.'],
-    indoorHack: sanitizeText(parsed.indoorHack, 280),
-    sustainableSwap: sanitizeText(parsed.sustainableSwap, 280),
-    directImpact: sanitizeText(parsed.directImpact, 320),
-    communityTip: sanitizeText(parsed.communityTip, 260)
+    headline: sanitizeText(parsed.headline, 180) || 'Grounded Air Quality Guidance',
+    factsUsed: toCleanList(parsed.factsUsed, 3),
+    recommendations: toCleanList(parsed.recommendations, 4),
+    indoorGuidance: sanitizeText(parsed.indoorGuidance, 320),
+    assumptionsAndLimits: toCleanList(parsed.assumptionsAndLimits, 3)
   };
 }
 
-/**
- * Factory creating the HTTP handler with injectable dependencies for deterministic testing.
- * @param {{ fetchImpl?: typeof fetch, env?: Record<string, string | undefined>, now?: () => number }} [deps]
- */
 export function createGeminiHandler(deps = {}) {
   const fetchImpl = deps.fetchImpl || globalThis.fetch;
   const env = deps.env || process.env;
@@ -121,40 +106,46 @@ export function createGeminiHandler(deps = {}) {
 
     const clientIp = String(req.headers?.['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
     if (!checkRateLimit(clientIp, now())) {
-      return res.status(429).json({ error: 'Rate limit exceeded. Please wait a minute and try again.' });
+      return res.status(429).json({ error: 'Rate limit exceeded. Please wait 60 seconds.' });
     }
 
     const body = req.body && typeof req.body === 'object' ? req.body : null;
     if (!body) {
-      return res.status(400).json({ error: 'Invalid JSON request payload.' });
+      return res.status(400).json({ error: 'Invalid JSON request body.' });
     }
-
     if (JSON.stringify(body).length > MAX_BODY_BYTES) {
-      return res.status(413).json({ error: 'Request payload too large.' });
+      return res.status(413).json({ error: 'Payload exceeds maximum allowed size.' });
     }
 
-    const headerKey = typeof req.headers?.['x-gemini-api-key'] === 'string'
-      ? req.headers['x-gemini-api-key'].trim()
-      : '';
-    const apiKey = env.GEMINI_API_KEY || (isPlausibleApiKey(headerKey) ? headerKey : '');
-
+    // Strict server-side credential isolation: ignore any client-supplied API keys
+    const apiKey = typeof env.GEMINI_API_KEY === 'string' ? env.GEMINI_API_KEY.trim() : '';
     if (!apiKey) {
       return res.status(503).json({
-        error: 'Gemini API key is not configured on the server.',
+        error: 'Server-side GEMINI_API_KEY is not configured.',
         fallbackRecommended: true
       });
     }
 
     const ctx = {
-      question: sanitizeText(body.question, 360) || 'How should my family stay safe from smog today?',
-      city: sanitizeText(body.city, 80) || 'Delhi NCR',
-      aqi: Math.round(clampNumber(body.aqi, 0, 500, 250)),
-      pm25: Math.round(clampNumber(body.pm25, 0, 600, 120)),
-      commuteMode: sanitizeText(body.commuteMode, 32) || 'two-wheeler',
+      question: sanitizeText(body.question, 360) || 'What precautions should my household take based on current air quality?',
+      city: sanitizeText(body.city, 80) || 'Selected Location',
+      lat: Number(clampNumber(body.lat, -90, 90, 0).toFixed(3)),
+      lon: Number(clampNumber(body.lon, -180, 180, 0).toFixed(3)),
+      sourceType: sanitizeText(body.sourceType, 80) || 'Modeled Atmospheric Grid (Open-Meteo/CAMS)',
+      aqi: Math.round(clampNumber(body.aqi, 0, 500, 0)),
+      aqiBand: sanitizeText(body.aqiBand, 32) || 'Unknown',
+      primaryPollutant: sanitizeText(body.primaryPollutant, 24) || 'PM2.5',
+      pm25: Number(clampNumber(body.pm25, 0, 600, 0).toFixed(1)),
+      pm10: Number(clampNumber(body.pm10, 0, 800, 0).toFixed(1)),
+      no2: Number(clampNumber(body.no2, 0, 500, 0).toFixed(1)),
+      trend: sanitizeText(body.trend, 24) || 'steady',
+      bestWindow: sanitizeText(body.bestWindow, 32) || 'Unavailable',
       householdProfile: sanitizeText(body.householdProfile, 32) || 'multi-gen',
-      budgetTier: sanitizeText(body.budgetTier, 32) || 'diy-budget',
-      cookingFuel: sanitizeText(body.cookingFuel, 32) || 'lpg-no-chimney',
-      roomSqFt: Math.round(clampNumber(body.roomSqFt, 80, 1500, 220))
+      commuteMode: sanitizeText(body.commuteMode, 32) || 'two-wheeler',
+      dailyCommuteKm: Math.round(clampNumber(body.dailyCommuteKm, 0, 120, 18)),
+      roomSqFt: Math.round(clampNumber(body.roomSqFt, 60, 2000, 220)),
+      recommendedCadr: Math.round(clampNumber(body.recommendedCadr, 100, 2000, 250)),
+      cookingFuel: sanitizeText(body.cookingFuel, 32) || 'lpg-no-chimney'
     };
 
     const controller = new AbortController();
@@ -170,10 +161,10 @@ export function createGeminiHandler(deps = {}) {
         },
         signal: controller.signal,
         body: JSON.stringify({
-          contents: [{ parts: [{ text: buildGroundedPrompt(ctx) }] }],
+          contents: [{ parts: [{ text: buildScientificPrompt(ctx) }] }],
           generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: 700,
+            temperature: 0.25,
+            maxOutputTokens: 750,
             responseMimeType: 'application/json'
           }
         })
@@ -181,22 +172,22 @@ export function createGeminiHandler(deps = {}) {
 
       if (!upstream.ok) {
         return res.status(502).json({
-          error: 'Upstream Gemini service returned an error.',
+          error: 'Upstream Gemini service unavailable.',
           fallbackRecommended: true
         });
       }
 
       const data = await upstream.json();
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const structured = parseSafeGeminiJson(text);
+      const structured = parseStructuredCoachResponse(text);
 
       return res.status(200).json({
-        engine: 'Google Gemini 2.5 Flash (Server Proxy)',
+        engine: 'Google Gemini 2.5 Flash (Server-Side Proxy)',
         ...structured
       });
     } catch {
       return res.status(504).json({
-        error: 'Gemini request timed out or could not be parsed.',
+        error: 'Gemini request timed out or returned invalid JSON.',
         fallbackRecommended: true
       });
     } finally {

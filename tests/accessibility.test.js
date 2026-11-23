@@ -5,39 +5,40 @@ import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 
-test('Accessibility WCAG Audit: semantic landmarks, language, and skip link exist', () => {
+test('WCAG 2.2 AA Audit: semantic landmarks, language, skip link, progressive disclosure & alert regions', () => {
   const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
   assert.match(html, /<html\s+lang="en">/i);
   assert.match(html, /class="skip-link"/);
   assert.match(html, /role="banner"/);
   assert.match(html, /<main[^>]*id="main-content"[^>]*role="main"/);
   assert.match(html, /role="contentinfo"/);
-});
-
-test('Accessibility WCAG Audit: ARIA tablist, dialog modal, and live regions are properly wired', () => {
-  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  assert.match(html, /id="error-banner"[^>]*role="alert"/);
+  assert.match(html, /<details\s+class="methodology-drawer">/);
   assert.match(html, /role="tablist"/);
   assert.match(html, /role="tab"/);
   assert.match(html, /role="tabpanel"/);
-  assert.match(html, /role="dialog"[^>]*aria-modal="true"/);
   assert.match(html, /aria-live="polite"/);
-  assert.match(html, /<progress\s+id="imp-meter"/);
 });
 
-test('Accessibility WCAG Audit: all static form controls have associated labels', () => {
+test('WCAG 2.2 AA Audit: every form control across all modules has an explicit associated label', () => {
   const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
   const controlIds = [
     'city-search-input',
     'profile-household',
     'profile-commute',
-    'profile-budget',
-    'profile-cooking',
-    'profile-room',
     'profile-km',
+    'profile-cooking',
+    'profile-budget',
+    'profile-room',
+    'profile-ceiling',
+    'profile-leakage',
+    'iaq-ach-input',
+    'iaq-cadr-input',
     'coach-input',
-    'pledge-neighborhood',
+    'pledge-area',
+    'pledge-category',
     'pledge-action',
-    'gemini-key-input'
+    'pledge-consent'
   ];
 
   for (const id of controlIds) {
@@ -46,9 +47,12 @@ test('Accessibility WCAG Audit: all static form controls have associated labels'
   }
 });
 
-test('Accessibility CSS Audit: visible focus indicators and prefers-reduced-motion support exist', () => {
+test('WCAG 2.2 AA & Mobile Responsive CSS Audit: focus outlines, 44px touch targets, reduced motion & breakpoints', () => {
   const css = fs.readFileSync(path.join(ROOT, 'styles/main.css'), 'utf8');
   assert.match(css, /:focus-visible\s*\{/);
+  assert.match(css, /min-height:\s*44px/);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+  assert.match(css, /@media\s*\(max-width:\s*1024px\)/);
+  assert.match(css, /@media\s*\(max-width:\s*680px\)/);
   assert.match(css, /\.sr-only\s*\{/);
 });

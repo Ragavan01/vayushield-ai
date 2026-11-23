@@ -1,101 +1,113 @@
 /**
- * @fileoverview Frontend GenAI Smog Coach client coordinating `/api/gemini`
- * with a rich, context-grounded deterministic fallback engine.
+ * @fileoverview VayuShield AI Coach client.
+ * Communicates strictly with the server-side `/api/gemini` proxy (no browser API keys)
+ * and provides a scientifically grounded fallback that explicitly separates facts,
+ * recommendations, indoor calculations, and uncertainties.
  */
 
-import { classifyAqi } from '../core/aqiEngine.js';
-import {
-  calculateChoiceImpact,
-  generateDailyRoutine,
-  generateIndoorHacks,
-  normalizeProfile
-} from '../core/recommendationEngine.js';
-import { isPlausibleApiKey, sanitizeText } from '../core/security.js';
+import { normalizeProfile } from '../core/impactModel.js';
+import { sanitizeText } from '../core/security.js';
 
 const CLIENT_TIMEOUT_MS = 13_000;
 
 export const COACH_PROMPT_TEMPLATES = Object.freeze([
   Object.freeze({
-    id: 'morning-school',
-    label: 'School Run & Kids Safety',
-    prompt: 'How do I protect my kids during the 7:30 AM winter smog school commute and evening play?'
+    id: 'explain-aqi',
+    label: 'Explain current AQI & primary pollutant',
+    prompt: 'Explain our current AQI estimate, which pollutant is driving it, and how reliable this modeled reading is.'
   }),
   Object.freeze({
-    id: 'budget-bedroom',
-    label: 'Clean Bedroom Under ₹2,500',
-    prompt: 'We cannot buy an expensive purifier—what is the highest-impact indoor air setup under ₹2,500?'
+    id: 'ventilation-timing',
+    label: 'Best ventilation & outdoor window',
+    prompt: 'Based on our 24-hour dispersion forecast, when is the cleanest window to ventilate or step outside?'
   }),
   Object.freeze({
-    id: 'commute-swap',
-    label: 'Low-Emission Commute Plan',
-    prompt: 'How much PM2.5 exposure and CO2 do I actually save by changing my daily commute and errand timing?'
+    id: 'indoor-cadr',
+    label: 'Explain my room CADR & budget options',
+    prompt: 'Explain the CADR calculation for my room size and compare zero-cost, DIY HEPA, and commercial purifier options.'
   }),
   Object.freeze({
-    id: 'community-rwa',
-    label: 'Apartment / RWA Smog Action',
-    prompt: 'What 3 actions can our residential apartment community take together this winter to cut local smog?'
+    id: 'family-routine',
+    label: 'Tailored family smog protection plan',
+    prompt: 'Create a practical, evidence-based daily plan for our household profile and commute distance today.'
   })
 ]);
 
 /**
- * Generates a deeply tailored, science-grounded fallback coaching plan when no live API key is configured.
+ * Builds a transparent, strictly grounded fallback response when the server-side Gemini proxy
+ * is unavailable or unconfigured. Never fabricates readings or claims live Gemini execution.
  * @param {string} question
- * @param {{ name: string, aqi: number, pm25: number }} airData
+ * @param {any} intel
  * @param {any} rawProfile
- * @param {string[]} selectedSwapIds
+ * @param {any} indoorEval
  */
-export function buildFallbackCoachingResponse(question, airData, rawProfile, selectedSwapIds = []) {
-  const cleanQuestion = sanitizeText(question, 300);
+export function buildGroundedFallback(question, intel, rawProfile, indoorEval) {
   const profile = normalizeProfile(rawProfile);
-  const band = classifyAqi(airData.aqi);
-  const routine = generateDailyRoutine(airData, profile);
-  const hacks = generateIndoorHacks(airData, profile);
-  const impact = calculateChoiceImpact(
-    selectedSwapIds.length ? selectedSwapIds : ['transit-carpool', 'hepa-sealed-sleep', 'induction-cooking'],
-    airData.pm25
-  );
+  const city = intel?.location?.name || 'Selected Location';
+  const aqi = intel?.cpcb?.aqi;
+  const band = intel?.cpcb?.band?.label || 'Unknown';
+  const primary = intel?.cpcb?.primaryPollutant;
+  const pm25_24h = intel?.rollingAverages?.pm25_24h;
+  const disp = intel?.dispersion;
+  const cleanQ = sanitizeText(question, 240);
 
-  const qLower = cleanQuestion.toLowerCase();
-  const topHack = hacks[0];
+  const factsUsed = [
+    `${city} (${intel?.location?.lat ?? '—'}°, ${intel?.location?.lon ?? '—'}°): ${intel?.metadata?.sourceType || 'Modeled Atmospheric Grid'} (${intel?.metadata?.gridResolution || '~40 km'}).`,
+    aqi !== null && aqi !== undefined
+      ? `CPCB-derived estimate: AQI ${aqi} (${band}); Primary pollutant: ${primary ? `${primary.name} (${primary.concentration} ${primary.unit},${primary.averaging})` : 'N/A'}.`
+      : 'Pollutant data was insufficient to compute a complete CPCB-derived AQI.',
+    disp?.available && disp.bestOutdoorWindow
+      ? `24-hr modeled PM2.5 trend: ${disp.trend}; lowest modeled 3-hr window is ${disp.bestOutdoorWindow.label} (~${disp.bestOutdoorWindow.avgPm25} µg/m³).`
+      : 'Hourly atmospheric dispersion forecast is unavailable for this request.'
+  ];
 
-  let headline = `${airData.name} (${band.label}, AQI ${airData.aqi}): Personalized Family Smog Plan`;
-  if (qLower.includes('kid') || qLower.includes('school')) {
-    headline = `Child-Safe Smog Protocol for ${airData.name} (AQI ${airData.aqi})`;
-  } else if (qLower.includes('2,500') || qLower.includes('budget') || qLower.includes('diy')) {
-    headline = `High-Impact Clean Room Setup Under ₹2,500 for ${profile.roomSqFt} sq.ft`;
-  } else if (qLower.includes('community') || qLower.includes('rwa') || qLower.includes('apartment')) {
-    headline = `Neighborhood Anti-Smog Action Blueprint for ${airData.name}`;
-  }
+  const recommendations = [
+    disp?.available && disp.bestVentilationWindow
+      ? disp.bestVentilationWindow.guidance
+      : 'Keep windows closed during stagnant low-wind periods and flush briefly only when outdoor haze improves.',
+    `For your ${profile.dailyCommuteKm} km ${profile.commuteMode} commute, ${aqi > 150 ? 'wear a tight-seal N95/FFP2 respirator along traffic corridors and avoid peak exhaust queues.' : 'standard precautions apply; monitor evening wind drops.'}`,
+    profile.cookingFuel === 'induction'
+      ? 'Continue electric/induction cooking with pan lids and kitchen exhaust during frying.'
+      : 'Run outward kitchen exhaust during LPG/solid-fuel cooking and shift boiling/simmering to electric appliances to reduce indoor NO₂ spikes.'
+  ];
+
+  const indoorGuidance = indoorEval
+    ? `For your ${indoorEval.dimensions.floorAreaSqFt} sq.ft room (${indoorEval.dimensions.volumeM3} m³ volume), target CADR ≥ ${indoorEval.sizing.recommendedCadrM3h} m³/h (${indoorEval.sizing.recommendedAch} ACH). Steady-state mass-balance modeling estimates indoor PM2.5 dropping from ~${indoorEval.outcomes.unfilteredIndoorPm25} to ~${indoorEval.outcomes.filteredIndoorPm25} µg/m³ (range ${indoorEval.outcomes.filteredRange[0]}–${indoorEval.outcomes.filteredRange[1]} µg/m³). Note: True HEPA captures particles only, not NO₂/VOCs; avoid ozone ionizers.`
+    : 'Size mechanical True HEPA filtration to 4–5 air changes per hour and keep ozone/ionizer modes off.';
+
+  const assumptionsAndLimits = [
+    'Generated by VayuShield Deterministic Grounded Engine because the server-side Gemini API proxy was unreachable or GEMINI_API_KEY is not active in this environment.',
+    `Modeled ${intel?.metadata?.gridResolution || '~40 km'} grid averages can underestimate street-level hotspots compared to nearby CPCB CAAQMS monitors; guidance is informational and not medical advice.`,
+    cleanQ ? `Query context evaluated: "${cleanQ}"` : 'Default household smog assessment.'
+  ];
 
   return {
-    engine: 'VayuShield Grounded Intelligence (Smart Fallback)',
-    headline,
-    immediateSteps: [
-      `${routine[0].phase} (${routine[0].slot}): ${routine[0].action}`,
-      `${routine[1].phase}: ${routine[1].action}`,
-      `${routine[2].phase} (${routine[2].slot}): ${routine[2].action}`
-    ],
-    indoorHack: `${topHack.title} — ${topHack.howTo} (${topHack.impactExplanation})`,
-    sustainableSwap: 'Batch local errands into the 1:30–4:00 PM thermal mixing dip and shift 3 weekly commute trips to transit/carpool + electric simmering indoors.',
-    directImpact: `Combining these habits cuts your personal PM2.5 exposure by ~${impact.totalExposureReductionPct}% (${impact.baselinePm25} → ${impact.projectedPm25} µg/m³, avoiding ~${impact.cigarettesAvoidedPerDay} passive cigarettes/day), saves ${impact.co2SavedKgPerMonth} kg CO₂/month, and scales to ${impact.community1000FamiliesCo2TonsPerYear} metric tons CO₂/year if 1,000 neighborhood families join.`,
-    communityTip: 'Propose a Zero Winter Leaf-Burning rule, damp morning courtyard sweeping, and a shared school-run carpool group in your apartment or street WhatsApp group.'
+    engine: 'VayuShield Grounded Engine (Server Proxy Unavailable)',
+    isFallback: true,
+    headline: aqi !== null && aqi !== undefined
+      ? `${city}: ${band} Modeled Air (Est. AQI ${aqi}) — Grounded Household Plan`
+      : `${city}: Grounded Air Quality Guidance`,
+    factsUsed,
+    recommendations,
+    indoorGuidance,
+    assumptionsAndLimits
   };
 }
 
 /**
- * Calls the secure `/api/gemini` serverless proxy with optional session-scoped key header,
- * automatically falling back to the local grounded engine if offline or unconfigured.
- * @param {{ question: string, airData: { name: string, aqi: number, pm25: number }, profile: any, selectedSwapIds?: string[], sessionApiKey?: string }} params
+ * Calls the server-side `/api/gemini` endpoint with validated telemetry and household context.
+ * @param {{ question: string, intel: any, profile: any, indoorEval: any }} params
  * @param {{ fetchImpl?: typeof fetch }} [options]
  */
-export async function askAirQualityAssistant(params, options = {}) {
+export async function askVayuShieldCoach(params, options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const profile = normalizeProfile(params.profile);
+  const intel = params.intel;
+  const indoorEval = params.indoorEval;
   const question = sanitizeText(params.question, 360) || COACH_PROMPT_TEMPLATES[0].prompt;
 
-  const headers = { 'Content-Type': 'application/json' };
-  if (isPlausibleApiKey(params.sessionApiKey)) {
-    headers['x-gemini-api-key'] = params.sessionApiKey.trim();
+  if (!intel || !intel.location) {
+    return buildGroundedFallback(question, intel, profile, indoorEval);
   }
 
   const controller = new AbortController();
@@ -104,18 +116,28 @@ export async function askAirQualityAssistant(params, options = {}) {
   try {
     const response = await fetchImpl('/api/gemini', {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
         question,
-        city: params.airData.name,
-        aqi: params.airData.aqi,
-        pm25: params.airData.pm25,
-        commuteMode: profile.commuteMode,
+        city: intel.location.name,
+        lat: intel.location.lat,
+        lon: intel.location.lon,
+        sourceType: `${intel.metadata.sourceType} (${intel.metadata.gridResolution})`,
+        aqi: intel.cpcb.aqi ?? 0,
+        aqiBand: intel.cpcb.band?.label || 'Unknown',
+        primaryPollutant: intel.cpcb.primaryPollutant?.name || 'PM2.5',
+        pm25: intel.rollingAverages.pm25_24h ?? intel.current.pm25 ?? 0,
+        pm10: intel.rollingAverages.pm10_24h ?? intel.current.pm10 ?? 0,
+        no2: intel.rollingAverages.no2_24h ?? intel.current.no2 ?? 0,
+        trend: intel.dispersion?.trend || 'unavailable',
+        bestWindow: intel.dispersion?.bestOutdoorWindow?.label || 'Unavailable',
         householdProfile: profile.householdProfile,
-        budgetTier: profile.budgetTier,
-        cookingFuel: profile.cookingFuel,
-        roomSqFt: profile.roomSqFt
+        commuteMode: profile.commuteMode,
+        dailyCommuteKm: profile.dailyCommuteKm,
+        roomSqFt: profile.roomSqFt,
+        recommendedCadr: indoorEval?.sizing?.recommendedCadrM3h || 250,
+        cookingFuel: profile.cookingFuel
       })
     });
 
@@ -124,13 +146,13 @@ export async function askAirQualityAssistant(params, options = {}) {
     }
 
     const payload = await response.json();
-    if (!payload || !payload.headline || !Array.isArray(payload.immediateSteps)) {
-      throw new Error('Malformed assistant payload');
+    if (!payload || !payload.headline || !Array.isArray(payload.recommendations)) {
+      throw new Error('Malformed coach response');
     }
 
-    return payload;
+    return { ...payload, isFallback: false };
   } catch {
-    return buildFallbackCoachingResponse(question, params.airData, profile, params.selectedSwapIds);
+    return buildGroundedFallback(question, intel, profile, indoorEval);
   } finally {
     clearTimeout(timer);
   }
