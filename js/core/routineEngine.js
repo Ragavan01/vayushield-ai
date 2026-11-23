@@ -1,75 +1,68 @@
 /**
- * @fileoverview Condition-driven Intelligent Daily Routine engine.
- * Generates practical household guidance strictly from actual modeled AQI,
- * atmospheric dispersion windows, weather context, and room filtration sizing.
- * Never guarantees medical outcomes or hardcodes fixed clock windows.
+ * @fileoverview Practical, daylight-aware Intelligent Daily Routine engine (Chimera v2.5).
+ * Explicitly separates:
+ * 1. Lowest modeled pollution period (often overnight — informational only)
+ * 2. Best practical daytime activity period (between sunrise & sunset, precipitation-checked)
+ * 3. Indoor protection & evening recovery periods
  */
 
 import { normalizeProfile } from './impactModel.js';
 
-/**
- * Generates an immediate "What should I do right now?" headline and guidance block
- * based on current AQI, dispersion risk, and household vulnerability.
- * @param {any} intel
- * @param {any} rawProfile
- */
 export function buildImmediateAction(intel, rawProfile) {
   const profile = normalizeProfile(rawProfile);
   const aqi = intel?.cpcb?.aqi ?? null;
   const bandLabel = intel?.cpcb?.band?.label || 'Unavailable';
   const primary = intel?.cpcb?.primaryPollutant?.name || 'PM2.5';
   const disp = intel?.dispersion;
-  const isSensitive = profile.householdProfile === 'kids' || profile.householdProfile === 'seniors-asthma' || profile.householdProfile === 'multi-gen';
+  const isSensitive = profile.householdProfile !== 'general';
 
   if (aqi === null) {
     return {
       level: 'neutral',
-      headline: 'Telemetry incomplete — verify local readings before strenuous outdoor activity',
-      detail: 'Pollutant data did not meet minimum completeness thresholds. Use the retry control or check an official CPCB CAAQMS station.'
+      headline: 'Telemetry incomplete — verify local conditions before strenuous outdoor activity',
+      detail: 'Pollutant readings did not satisfy minimum completeness criteria. Use Refresh or verify an official CPCB CAAQMS monitor.'
     };
   }
 
-  const bestWindowText = disp?.available && disp.bestOutdoorWindow
-    ? `Lowest forecasted PM2.5 window is ${disp.bestOutdoorWindow.label} (~${disp.bestOutdoorWindow.avgPm25} µg/m³).`
-    : 'Hourly dispersion forecast is currently unavailable.';
+  const daytimeText = disp?.available && disp.bestDaytimeWindow
+    ? `Best practical daytime window is ${disp.bestDaytimeWindow.label} (Projected PM2.5: ${disp.bestDaytimeWindow.avgPm25} µg/m³).`
+    : 'Daytime forecast window is currently unavailable.';
+
+  const overnightNote = disp?.available && disp.lowestPollutionWindow && !disp.lowestPollutionWindow.isDaytime
+    ? ` Overnight minimum occurs ${disp.lowestPollutionWindow.label} (${disp.lowestPollutionWindow.avgPm25} µg/m³), shown for context rather than outdoor exercise.`
+    : '';
 
   if (aqi > 300) {
     return {
       level: 'alert',
-      headline: `${bandLabel} air (est. AQI ${aqi}, primary ${primary}) — move activities indoors and run mechanical filtration`,
-      detail: `Avoid outdoor exertion${isSensitive ? ', especially for children, elders, and asthma-sensitive members' : ''}. Wear a well-fitted N95/FFP2 respirator for unavoidable trips. ${bestWindowText}`
+      headline: `${bandLabel} air (Est. AQI ${aqi}, primary ${primary}) — stay indoors and run True HEPA filtration`,
+      detail: `Avoid outdoor exertion${isSensitive ? ', particularly for children, seniors, and respiratory-sensitive members' : ''}. Wear a well-fitted N95/FFP2 respirator for unavoidable trips. ${daytimeText}`
     };
   }
 
   if (aqi > 200) {
     return {
       level: 'alert',
-      headline: `${bandLabel} air (est. AQI ${aqi}, primary ${primary}) — limit prolonged outdoor exposure`,
-      detail: `Use a tight-seal N95 mask on traffic corridors and keep windows closed during stagnation periods. ${bestWindowText}`
+      headline: `${bandLabel} air (Est. AQI ${aqi}, primary ${primary}) — reduce prolonged outdoor exposure`,
+      detail: `Use a tight-seal N95 mask on traffic corridors and keep windows closed during stagnation periods. ${daytimeText}`
     };
   }
 
   if (aqi > 100) {
     return {
       level: 'warn',
-      headline: `${bandLabel} air (est. AQI ${aqi}, primary ${primary}) — pace outdoor exertion`,
-      detail: `${isSensitive ? 'Sensitive household members should reduce prolonged outdoor activity near heavy traffic. ' : ''}${bestWindowText}`
+      headline: `${bandLabel} air (Est. AQI ${aqi}, primary ${primary}) — pace daytime outdoor exertion`,
+      detail: `${isSensitive ? 'Sensitive household members should limit sustained exertion near heavy traffic. ' : ''}${daytimeText}${overnightNote}`
     };
   }
 
   return {
     level: 'favorable',
-    headline: `${bandLabel} air (est. AQI ${aqi}, primary ${primary}) — favorable for outdoor activity and ventilation`,
-    detail: `Modeled conditions are relatively clean. Natural cross-ventilation is suitable while monitoring for evening wind drops. ${bestWindowText}`
+    headline: `${bandLabel} air (Est. AQI ${aqi}, primary ${primary}) — generally favorable for daytime activity`,
+    detail: `Modeled ambient air is comparatively clean (lower pollution reduces risk but does not guarantee health safety for sensitive individuals). ${daytimeText}`
   };
 }
 
-/**
- * Generates 6 conditional daily routine modules tied directly to live location forecast data.
- * @param {any} intel
- * @param {any} rawProfile
- * @param {any} indoorEval
- */
 export function buildIntelligentRoutine(intel, rawProfile, indoorEval) {
   const profile = normalizeProfile(rawProfile);
   const aqi = intel?.cpcb?.aqi ?? 0;
@@ -78,94 +71,106 @@ export function buildIntelligentRoutine(intel, rawProfile, indoorEval) {
   const windKmh = intel?.current?.windKmh;
   const disp = intel?.dispersion;
 
-  const bestWindow = disp?.available && disp.bestOutdoorWindow ? disp.bestOutdoorWindow : null;
-  const worstWindow = disp?.available && disp.peakAccumulationWindow ? disp.peakAccumulationWindow : null;
+  const daytimeWindow = disp?.available && disp.bestDaytimeWindow ? disp.bestDaytimeWindow : null;
+  const lowestWindow = disp?.available && disp.lowestPollutionWindow ? disp.lowestPollutionWindow : null;
+  const peakWindow = disp?.available && disp.peakAccumulationWindow ? disp.peakAccumulationWindow : null;
+  const eveningWatch = disp?.available && disp.eveningWatchWindow ? disp.eveningWatchWindow : peakWindow;
   const ventWindow = disp?.available && disp.bestVentilationWindow ? disp.bestVentilationWindow : null;
 
   const weatherNote = typeof tempC === 'number' && typeof windKmh === 'number'
-    ? `Current surface context: ${tempC.toFixed(1)} °C, wind ${windKmh.toFixed(1)} km/h.`
+    ? `Surface context: ${tempC.toFixed(1)} °C, wind ${windKmh.toFixed(1)} km/h.`
     : 'Surface weather telemetry unavailable.';
 
+  const lowestContext = lowestWindow && !lowestWindow.isDaytime
+    ? ` Note: The absolute lowest modeled PM2.5 occurs overnight (${lowestWindow.label}, ${lowestWindow.avgPm25} µg/m³), which is unsuitable for outdoor exercise.`
+    : '';
+
+  const rainWarning = daytimeWindow && daytimeWindow.maxPrecipMm >= 1.5
+    ? ` Forecast also indicates rain (~${daytimeWindow.maxPrecipMm} mm/hr); consider indoor alternatives.`
+    : '';
+
   const commuteMap = {
-    car: `For your ${profile.dailyCommuteKm} km car commute, switch cabin HVAC to Recirculate on congested corridors (briefly flush with outside air every 20–30 min to avoid CO₂ buildup) and consider shifting 2–3 days/week to public transit.`,
-    'two-wheeler': `For your ${profile.dailyCommuteKm} km two-wheeler ride, ${aqi > 150 ? 'wear a tight-seal N95/KF94 mask without loose gaps' : 'keep an N95 mask ready for heavy-traffic intersections'} and avoid riding immediately behind diesel exhaust plumes.`,
-    'public-transit': `Your transit commute (${profile.dailyCommuteKm} km) already lowers per-passenger tailpipe emissions. ${aqi > 200 ? 'Wear an N95 mask while waiting at road-level stops.' : 'Prefer shaded or enclosed waiting areas during peak traffic.'}`,
-    'wfh-walk': `Batch walking errands into ${bestWindow ? `the forecasted lower-PM2.5 window (${bestWindow.label})` : 'midday hours with higher wind mixing'} and prefer residential streets over arterial roads.`
+    car: `For your ${profile.dailyCommuteKm} km car commute, use cabin Recirculate mode through congested corridors (flush briefly with outside air every 20–30 min to avoid CO₂ buildup) and consider public transit 2–3 days/week.`,
+    'two-wheeler': `For your ${profile.dailyCommuteKm} km two-wheeler ride, ${aqi > 150 ? 'wear a well-fitted N95/KF94 respirator without seal gaps' : 'keep a fitted N95 mask accessible for heavy-traffic stretches'} and avoid idling directly behind diesel exhaust.`,
+    'public-transit': `Your ${profile.dailyCommuteKm} km transit commute lowers per-passenger tailpipe emissions. ${aqi > 200 ? 'Wear a fitted N95 respirator at road-level stops.' : 'Wait away from busy curbside idling lanes.'}`,
+    'wfh-walk': `Schedule walking errands during ${daytimeWindow ? `the practical daytime window (${daytimeWindow.label})` : 'midday well-mixed hours'} along lower-traffic side streets.`
   };
 
   const cookingAdvice = profile.cookingFuel === 'induction'
-    ? 'Continue using electric/induction cooking with pan lids and range exhaust during high-heat frying to limit cooking aerosols.'
+    ? 'Continue electric/induction cooking with pan lids and kitchen exhaust during high-heat frying to capture cooking aerosols.'
     : profile.cookingFuel === 'lpg-exhaust'
-      ? 'Run your ducted chimney/exhaust continuously during cooking and for 10 minutes after; shift boiling/simmering to an electric kettle or induction plate when outdoor ventilation is restricted.'
-      : 'Unvented gas or solid-fuel combustion rapidly elevates indoor NO₂ and PM2.5. Crack a kitchen window with an outward exhaust fan while cooking, cover pans, and shift boiling tasks to electric appliances where feasible.';
+      ? 'Run ducted kitchen exhaust throughout cooking and for 10 minutes afterward; shift boiling/simmering to an electric kettle or induction plate when windows stay closed.'
+      : 'Unvented gas or solid-fuel cooking sharply raises indoor NO₂ and PM2.5. Crack a kitchen window with an outward exhaust fan during meal prep, cover pans, and shift boiling tasks to electric appliances where feasible.';
 
   const vulnerabilityNote = {
-    kids: 'Keep school/play shoes at the entrance, shift vigorous outdoor sports indoors when AQI exceeds 200, and review pediatrician asthma action plans if applicable.',
-    'seniors-asthma': 'Keep prescribed respiratory medications accessible, prioritize a filtered rest room on Poor/Severe days, and seek medical advice promptly if shortness of breath or wheezing occurs.',
-    'multi-gen': 'Designate one well-sealed room as a shared clean-air zone for children and older adults during high-stagnation periods.',
-    general: 'Avoid heavy outdoor cardio during peak accumulation hours and stay hydrated.'
+    kids: 'Remove outdoor shoes at the entry, shift vigorous youth sports indoors when AQI exceeds 200, and follow pediatrician guidance for any child with asthma.',
+    'seniors-asthma': 'Keep prescribed inhalers/medications accessible, prioritize a filtered room on Poor/Severe days, and consult a clinician promptly for respiratory symptoms.',
+    'multi-gen': 'Maintain one well-sealed shared room with mechanical filtration for children and older adults during high-stagnation periods.',
+    general: 'Avoid intense outdoor cardio during peak accumulation windows and stay hydrated.'
   }[profile.householdProfile];
 
   return [
     {
-      id: 'morning-outdoor',
-      phase: 'Outdoor Activity & Exercise Timing',
-      window: bestWindow ? `Preferred: ${bestWindow.label}` : 'Check Hourly Forecast',
-      condition: worstWindow
-        ? `Peak modeled accumulation: ${worstWindow.label} (avg ~${worstWindow.avgPm25} µg/m³ PM2.5). ${weatherNote}`
+      id: 'daytime-activity',
+      phase: 'Practical Daytime Activity Period',
+      window: daytimeWindow ? `Daytime: ${daytimeWindow.label}` : 'Daylight Window Pending',
+      condition: daytimeWindow
+        ? `Projected PM2.5: ${daytimeWindow.avgPm25} µg/m³ (${daytimeWindow.deltaText}). Sunrise ${disp.daylight.sunriseLabel} · Sunset ${disp.daylight.sunsetLabel}. ${weatherNote}`
         : `24-hr rolling PM2.5: ${pm25_24h} µg/m³. ${weatherNote}`,
       action: aqi > 200
-        ? `Move vigorous cardio indoors today. If outdoor movement is essential, schedule light activity during ${bestWindow ? bestWindow.label : 'the lowest wind-stagnation period'}.`
+        ? `Prioritize indoor movement today rather than outdoor workouts. If outdoor errands are necessary, use the cleanest practical daytime period (${daytimeWindow ? daytimeWindow.label : 'midday'}).${lowestContext}${rainWarning}`
         : aqi > 100
-          ? `Prefer moderate outdoor activity during ${bestWindow ? bestWindow.label : 'well-mixed hours'} away from main arterial roads.`
-          : 'Modeled ambient air is favorable for standard outdoor exercise and walking.',
-      basis: 'Conditioned on modeled 24-hr hourly PM2.5 curve and breathing-rate exposure physics (no medical guarantee).'
+          ? `Schedule light-to-moderate daytime outdoor activity during ${daytimeWindow ? daytimeWindow.label : 'well-mixed daylight hours'} away from arterial traffic.${lowestContext}${rainWarning}`
+          : `Daytime conditions (${daytimeWindow ? daytimeWindow.label : 'daylight hours'}) are favorable for normal outdoor activity.${rainWarning}`,
+      basis: 'Constrained strictly to local sunrise–sunset daylight hours and precipitation forecasts; lower pollution reduces risk without guaranteeing safety.'
     },
     {
       id: 'commute-school',
       phase: 'Work & School Commute Guidance',
       window: `${profile.dailyCommuteKm} km · ${profile.commuteMode}`,
-      condition: `Estimated AQI ${aqi} (${intel?.cpcb?.band?.label || 'N/A'}) · Primary pollutant: ${intel?.cpcb?.primaryPollutant?.name || 'PM2.5'}`,
+      condition: `Est. AQI ${aqi} (${intel?.cpcb?.band?.label || 'N/A'}) · Primary pollutant: ${intel?.cpcb?.primaryPollutant?.name || 'PM2.5'}`,
       action: `${commuteMap[profile.commuteMode]} ${vulnerabilityNote}`,
-      basis: 'Tailored to commute mode, distance, and roadside traffic exposure dynamics.'
+      basis: 'Tailored to commute mode, daily distance, and household vulnerability.'
     },
     {
       id: 'ventilation',
-      phase: 'Smart Ventilation Window',
-      window: ventWindow ? ventWindow.label : 'Monitor Wind & PM2.5',
+      phase: 'Daytime Ventilation Window',
+      window: ventWindow ? `Flush: ${ventWindow.label}` : 'Monitor Daylight PM2.5',
       condition: disp?.classification || 'Modeled dispersion estimate',
       action: ventWindow
         ? ventWindow.guidance
-        : 'Keep windows closed during visible haze or low-wind stagnation; flush briefly when outdoor haze clears to control indoor CO₂.',
-      basis: 'Derived from hourly modeled PM2.5 and Ventilation Coefficient (BLH × 10m wind speed).'
+        : 'Keep exterior openings closed during stagnation; flush briefly during lower-haze daylight periods to manage indoor CO₂.',
+      basis: 'Aligned to practical daytime Ventilation Coefficient (BLH × 10m wind speed) rather than overnight minimums.'
     },
     {
       id: 'cooking',
       phase: 'Kitchen & Indoor Combustion Control',
       window: 'During Meal Prep',
-      condition: `Kitchen setup: ${profile.cookingFuel} · Avoid indoor incense, candles, and mosquito coils on high-AQI days`,
+      condition: `Fuel setup: ${profile.cookingFuel} · Avoid incense, candles, and mosquito coils during elevated AQI`,
       action: cookingAdvice,
-      basis: 'Combustion produces both fine particulates (PM2.5) and gaseous NO₂/CO, which HEPA filters alone do not remove.'
+      basis: 'Indoor combustion emits both PM2.5 and gaseous NO₂/CO; True HEPA captures particles only, not gases.'
     },
     {
       id: 'indoor-filtration',
-      phase: 'Indoor Air Filtration Target',
+      phase: 'Indoor Protection & Filtration Target',
       window: `${profile.roomSqFt} sq.ft · ${profile.ceilingHeightFt} ft ceiling`,
       condition: `Room volume ${indoorEval.dimensions.volumeM3} m³ · Target ${indoorEval.sizing.recommendedAch} ACH`,
       action: aqi > 100
-        ? `Run mechanical True HEPA filtration (recommended CADR ≥ ${indoorEval.sizing.recommendedCadrM3h} m³/h; ionizer OFF). Under ${indoorEval.assumptions.leakageLabel.toLowerCase()} assumptions, steady-state indoor PM2.5 is modeled at ~${indoorEval.outcomes.filteredIndoorPm25} µg/m³ (range ${indoorEval.outcomes.filteredRange[0]}–${indoorEval.outcomes.filteredRange[1]} µg/m³) vs. ~${indoorEval.outcomes.unfilteredIndoorPm25} µg/m³ unfiltered.`
-        : 'Active HEPA filtration is optional today unless indoor cooking, dust, or allergy triggers are present.',
+        ? `Operate mechanical True HEPA filtration (recommended CADR ≥ ${indoorEval.sizing.recommendedCadrM3h} m³/h; ionizer OFF). Under ${indoorEval.assumptions.leakageLabel.toLowerCase()} assumptions, modeled steady-state indoor PM2.5 drops from ${indoorEval.outcomes.unfilteredIndoorPm25} µg/m³ to ${indoorEval.outcomes.filteredIndoorPm25} µg/m³ (uncertainty range ${indoorEval.outcomes.filteredRange[0]}–${indoorEval.outcomes.filteredRange[1]} µg/m³).`
+        : 'Active HEPA filtration is optional today unless cooking smoke, indoor dust, or allergies are present.',
       basis: 'Computed from single-zone steady-state mass-balance physics (infiltration + deposition + CADR).'
     },
     {
       id: 'evening-night',
       phase: 'Evening & Overnight Recovery',
-      window: worstWindow ? `Watch: ${worstWindow.label}` : 'Evening to Dawn',
-      condition: disp?.trend ? `Next 6-hr PM2.5 trend: ${disp.trend} (${disp.trendDeltaPct >= 0 ? '+' : ''}${disp.trendDeltaPct}%)` : 'Monitor evening dispersion drop',
-      action: aqi > 150
-        ? 'Close exterior windows and door gaps before evening cooling reduces boundary-layer mixing. Use damp microfiber mopping rather than dry sweeping, and run bedroom filtration on quiet night mode.'
-        : 'Maintain normal bedroom ventilation and avoid burning yard waste or trash outdoors.',
-      basis: 'Evening radiative cooling typically compresses the surface mixing layer and traps local emissions.'
+      window: eveningWatch ? `Night Watch: ${eveningWatch.label}` : 'Evening to Dawn',
+      condition: eveningWatch
+        ? `Peak overnight/evening accumulation risk: ${eveningWatch.label} (Projected PM2.5: ${eveningWatch.avgPm25} µg/m³). Next 6h trend: ${disp?.trend || 'steady'}.`
+        : 'Monitor evening radiative cooling and boundary-layer compression.',
+      action: aqi > 150 || (eveningWatch && eveningWatch.avgPm25 > 60)
+        ? 'Close exterior windows and door gaps before evening wind drops compress the surface boundary layer. Damp-mop floors instead of dry sweeping and run bedroom filtration on quiet night mode.'
+        : 'Maintain normal bedroom comfort, avoid outdoor waste/leaf burning, and check morning air quality before early workouts.',
+      basis: 'Tracks evening-to-dawn stagnation separately from daytime peaks.'
     }
   ];
 }

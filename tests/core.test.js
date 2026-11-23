@@ -122,7 +122,7 @@ test('Dispersion Engine: computes Ventilation Coefficient & dynamic cleanest/pea
   assert.equal(forecast.bestOutdoorWindow.label, '08:00–10:00');
   assert.equal(forecast.peakAccumulationWindow.label, '00:00–02:00');
   assert.equal(forecast.trend, 'improving');
-  assert.match(forecast.classification, /Dispersion-Risk Estimate/i);
+  assert.match(forecast.classification, /Stagnation Risk|Dispersion Conditions/i);
 
   const tooShort = analyzeDispersionForecast(synthetic.slice(0, 3));
   assert.equal(tooShort.available, false);

@@ -188,7 +188,7 @@ test('Air Quality Service: dual-API ingestion computes 24h CPCB estimate, disper
 
   const cached = await fetchAirIntelligence(loc, { pastDays: 1, fetchImpl: mockFetch, now: () => 5000 });
   assert.equal(aqCalls, 1);
-  assert.match(cached.metadata.freshness, /Cached/i);
+  assert.equal(cached.metadata.fromCache, true);
 
   // Upstream failure must throw explicitly rather than silently substituting Delhi NCR
   clearAirQualityCache();

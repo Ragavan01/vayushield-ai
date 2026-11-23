@@ -177,9 +177,11 @@ function renderLiveIntelligence() {
 
   document.getElementById('source-type-badge').textContent = `Modeled · ${metadata.gridResolution}`;
   const freshnessEl = document.getElementById('freshness-badge');
-  freshnessEl.textContent = `${metadata.freshness} · ${formatLocalTimestamp(current.timestamp)}`;
-  freshnessEl.className = 'badge badge-teal';
-
+  freshnessEl.textContent = `${metadata.freshness} · Valid ${formatLocalTimestamp(current.timestamp)}`;
+  freshnessEl.className = `badge badge-${metadata.freshnessState?.badgeTone || 'teal'}`;
+  if (metadata.isStaleFallback && metadata.staleWarning) {
+    showErrorBanner('Displaying Stale Cached Data', metadata.staleWarning);
+  }
   const trendEl = document.getElementById('trend-badge');
   const trendLabel = dispersion.available
     ? `6h Trend: ${dispersion.trend} (${dispersion.trendDeltaPct >= 0 ? '+' : ''}${dispersion.trendDeltaPct}%)`
@@ -302,11 +304,13 @@ function renderHistoryChart() {
 
   const history = state.intel?.history;
   const points = history?.points || [];
-  document.getElementById('history-caption').textContent = points.length >= 2
-    ? `Modeled hourly PM2.5 over past ${history.pastDays === 1 ? '24 hours' : `${history.pastDays} days`} (${points.length} hourly points)`
+  const validPoints = points.filter((p) => typeof p.pm25 === 'number');
+
+  document.getElementById('history-caption').textContent = validPoints.length >= 2
+    ? `Modeled hourly PM2.5 over past ${history.pastDays === 1 ? '24 hours' : `${history.pastDays} days`} (${validPoints.length}/${history.expectedHours || points.length} valid hours)`
     : 'Historical records unavailable for the selected range.';
 
-  if (points.length < 2) {
+  if (validPoints.length < 2) {
     wrap.appendChild(createSafeElement(document, 'p', {
       className: 'muted-text',
       text: 'Insufficient historical data points returned by upstream API.'
@@ -314,22 +318,21 @@ function renderHistoryChart() {
     return;
   }
 
-  // Downsample gently for crisp SVG rendering on 7d/30d views while preserving peaks
   const maxRender = 96;
   const step = Math.max(1, Math.floor(points.length / maxRender));
   const sampled = points.filter((_, idx) => idx % step === 0 || idx === points.length - 1);
 
-  const values = sampled.map((p) => p.pm25);
-  const maxVal = Math.max(30, ...values);
+  const values = sampled.map((p) => p.pm25).filter((v) => typeof v === 'number');
+  const maxVal = Math.max(70, ...values);
   const minVal = Math.min(...values);
   const avgVal = (values.reduce((s, v) => s + v, 0) / values.length).toFixed(1);
 
   const width = 560;
-  const height = 148;
+  const height = 156;
   const padL = 36;
   const padR = 14;
   const padT = 18;
-  const padB = 26;
+  const padB = 28;
   const plotW = width - padL - padR;
   const plotH = height - padT - padB;
 
@@ -337,61 +340,76 @@ function renderHistoryChart() {
     viewBox: `0 0 ${width} ${height}`,
     class: 'chart-svg',
     role: 'img',
-    'aria-label': `Historical modeled PM2.5 chart over past ${history.pastDays} days. Min ${minVal}, average ${avgVal}, max ${maxVal} micrograms per cubic meter.`
+    'aria-label': `Historical modeled PM2.5 over past ${history.pastDays} days. Min ${minVal}, average ${avgVal}, max ${maxVal} micrograms per cubic meter. Dashed green line marks WHO 2021 24-hour guideline (15), amber line marks CPCB Satisfactory upper limit (60).`
   });
 
-  // WHO 24h reference line (15 µg/m³)
-  const whoY = padT + plotH - (Math.min(15, maxVal) / maxVal) * plotH;
-  svg.appendChild(createSvg('line', {
-    x1: padL,
-    y1: whoY,
-    x2: width - padR,
-    y2: whoY,
-    stroke: '#22C55E',
-    'stroke-dasharray': '4 4',
-    'stroke-width': '1',
-    opacity: '0.65'
-  }));
+  // Labeled Reference Lines (WHO 2021 15 ug/m3 & CPCB Satisfactory 60 ug/m3)
+  const thresholds = [
+    { val: 15, color: '#22C55E', label: 'WHO 15' },
+    { val: 60, color: '#F59E0B', label: 'CPCB 60' }
+  ];
+  for (const th of thresholds) {
+    if (th.val <= maxVal) {
+      const ty = padT + plotH - (th.val / maxVal) * plotH;
+      svg.appendChild(createSvg('line', {
+        x1: padL, y1: ty.toFixed(1), x2: width - padR, y2: ty.toFixed(1),
+        stroke: th.color, 'stroke-dasharray': '4 4', 'stroke-width': '1', opacity: '0.6'
+      }));
+      const tl = createSvg('text', {
+        x: width - padR, y: (ty - 3).toFixed(1), 'text-anchor': 'end', fill: th.color, 'font-size': '9'
+      });
+      tl.textContent = th.label;
+      svg.appendChild(tl);
+    }
+  }
 
-  const coords = sampled.map((pt, i) => {
-    const x = padL + (i / Math.max(1, sampled.length - 1)) * plotW;
-    const y = padT + plotH - (pt.pm25 / maxVal) * plotH;
-    return [Number(x.toFixed(1)), Number(y.toFixed(1))];
+  // Build disconnected polyline segments across missing/null points (never fabricate interpolation)
+  let currentSegment = [];
+  const segments = [];
+  sampled.forEach((pt, i) => {
+    if (typeof pt.pm25 !== 'number') {
+      if (currentSegment.length) {
+        segments.push(currentSegment);
+        currentSegment = [];
+      }
+      return;
+    }
+    const x = Number((padL + (i / Math.max(1, sampled.length - 1)) * plotW).toFixed(1));
+    const y = Number((padT + plotH - (pt.pm25 / maxVal) * plotH).toFixed(1));
+    currentSegment.push({ x, y, pt });
   });
+  if (currentSegment.length) segments.push(currentSegment);
 
-  const polylinePoints = coords.map(([x, y]) => `${x},${y}`).join(' ');
-  const areaPoints = `${padL},${padT + plotH} ${polylinePoints} ${coords[coords.length - 1][0]},${padT + plotH}`;
+  for (const seg of segments) {
+    const ptsStr = seg.map((p) => `${p.x},${p.y}`).join(' ');
+    if (seg.length >= 2) {
+      svg.appendChild(createSvg('polyline', {
+        points: ptsStr,
+        fill: 'none',
+        stroke: '#2DD4BF',
+        'stroke-width': '2',
+        'stroke-linejoin': 'round'
+      }));
+    }
+    for (const node of seg) {
+      const dot = createSvg('circle', {
+        cx: node.x, cy: node.y, r: '2.5', fill: '#2DD4BF', opacity: '0.85'
+      });
+      const tip = createSvg('title');
+      tip.textContent = `${node.pt.time.replace('T', ' ')} — Modeled PM2.5: ${node.pt.pm25} µg/m³`;
+      dot.appendChild(tip);
+      svg.appendChild(dot);
+    }
+  }
 
-  svg.appendChild(createSvg('polygon', {
-    points: areaPoints,
-    fill: '#2DD4BF',
-    opacity: '0.12'
-  }));
-
-  svg.appendChild(createSvg('polyline', {
-    points: polylinePoints,
-    fill: 'none',
-    stroke: '#2DD4BF',
-    'stroke-width': '2',
-    'stroke-linejoin': 'round'
-  }));
-
-  // Axis & summary labels
-  const labels = [
+  const axisLabels = [
     { x: padL - 6, y: padT + 4, anchor: 'end', text: String(Math.round(maxVal)), fill: '#94A3B8' },
     { x: padL - 6, y: padT + plotH, anchor: 'end', text: '0', fill: '#94A3B8' },
     { x: padL, y: height - 6, anchor: 'start', text: sampled[0].time.slice(5, 16).replace('T', ' '), fill: '#94A3B8' },
-    { x: width - padR, y: height - 6, anchor: 'end', text: `Avg ${avgVal} · Max ${maxVal} µg/m³`, fill: '#CBD5E1' }
+    { x: width - padR, y: height - 6, anchor: 'end', text: `Min ${minVal} · Avg ${avgVal} · Max ${maxVal} µg/m³`, fill: '#CBD5E1' }
   ];
-
-  for (const l of labels) {
-    const t = createSvg('text', {
-      x: l.x,
-      y: l.y,
-      'text-anchor': l.anchor,
-      fill: l.fill,
-      'font-size': '10'
-    });
+  for (const l of axisLabels) {
+    const t = createSvg('text', { x: l.x, y: l.y, 'text-anchor': l.anchor, fill: l.fill, 'font-size': '10' });
     t.textContent = l.text;
     svg.appendChild(t);
   }
@@ -426,14 +444,21 @@ function renderDispersionModule() {
       ? `${firstHour.vc.toLocaleString('en-IN')} m²/s`
       : 'Unavailable';
 
-  if (dispersion.available && dispersion.bestOutdoorWindow && dispersion.peakAccumulationWindow) {
-    document.getElementById('best-window-val').textContent = dispersion.bestOutdoorWindow.label;
-    document.getElementById('best-window-note').textContent =
-      `Avg ~${dispersion.bestOutdoorWindow.avgPm25} µg/m³ PM2.5${dispersion.bestOutdoorWindow.avgVc ? ` · VC ${dispersion.bestOutdoorWindow.avgVc.toLocaleString('en-IN')} m²/s` : ''}`;
+  const dayWin = dispersion.bestDaytimeWindow;
+  const peakWin = dispersion.peakAccumulationWindow;
+  const lowWin = dispersion.lowestPollutionWindow;
 
-    document.getElementById('worst-window-val').textContent = dispersion.peakAccumulationWindow.label;
+  if (dispersion.available && dayWin && peakWin) {
+    document.getElementById('best-window-val').textContent = `Daytime: ${dayWin.label}`;
+    const overnightTag = lowWin && !lowWin.isDaytime
+      ? ` · Overnight min ${lowWin.label} (${lowWin.avgPm25} µg/m³)`
+      : '';
+    document.getElementById('best-window-note').textContent =
+      `${dayWin.projectedText} · ${dayWin.deltaText}${overnightTag}`;
+
+    document.getElementById('worst-window-val').textContent = peakWin.label;
     document.getElementById('worst-window-note').textContent =
-      `Avg ~${dispersion.peakAccumulationWindow.avgPm25} µg/m³ PM2.5${dispersion.peakAccumulationWindow.avgVc ? ` · VC ${dispersion.peakAccumulationWindow.avgVc.toLocaleString('en-IN')} m²/s` : ''}`;
+      `${peakWin.projectedText} · ${peakWin.deltaText}${peakWin.avgVc ? ` · VC ${peakWin.avgVc.toLocaleString('en-IN')} m²/s` : ''}`;
   } else {
     document.getElementById('best-window-val').textContent = 'Unavailable';
     document.getElementById('worst-window-val').textContent = 'Unavailable';
@@ -490,14 +515,18 @@ function renderDispersionModule() {
           ? '#F59E0B'
           : '#38BDF8';
 
-    svg.appendChild(createSvg('rect', {
+   const bar = createSvg('rect', {
       x: x.toFixed(1),
       y: y.toFixed(1),
       width: barW.toFixed(1),
       height: bh.toFixed(1),
       rx: '2',
       fill
-    }));
+    });
+    const tip = createSvg('title');
+    tip.textContent = `${h.hourLabel} (${h.isDaytime ? 'Daytime' : 'Overnight'}) — Forecast PM2.5: ${h.pm25} µg/m³ · ${h.dispersionCategory}${h.blh ? ` · BLH ${h.blh} m` : ''}`;
+    bar.appendChild(tip);
+    svg.appendChild(bar);
 
     if (idx % 4 === 0) {
       const lbl = createSvg('text', {
@@ -920,13 +949,16 @@ function renderDependentModules() {
   renderImpactSimulator();
 }
 
-async function loadLocationIntelligence() {
+async function loadLocationIntelligence(forceRefresh = false) {
   const token = ++state.fetchToken;
   setLoadingState(true);
   hideErrorBanner();
 
   try {
-    const intel = await fetchAirIntelligence(state.location, { pastDays: state.pastDays });
+    const intel = await fetchAirIntelligence(state.location, {
+      pastDays: state.pastDays,
+      forceRefresh
+    });
     if (token !== state.fetchToken) return;
     state.intel = intel;
     renderLiveIntelligence();
@@ -940,13 +972,12 @@ async function loadLocationIntelligence() {
       `Live atmospheric data unavailable for ${state.location.name}`,
       `${err?.message || 'Upstream telemetry request failed.'} VayuShield does not substitute data from another city.`
     );
-    document.getElementById('freshness-badge').textContent = 'Fetch failed';
+    document.getElementById('freshness-badge').textContent = 'Unavailable';
     document.getElementById('freshness-badge').className = 'badge badge-alert';
   } finally {
     if (token === state.fetchToken) setLoadingState(false);
   }
 }
-
 function syncProfileInputs() {
   document.getElementById('profile-household').value = state.profile.householdProfile;
   document.getElementById('profile-commute').value = state.profile.commuteMode;

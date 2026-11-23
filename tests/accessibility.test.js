@@ -52,7 +52,7 @@ test('WCAG 2.2 AA & Mobile Responsive CSS Audit: focus outlines, 44px touch targ
   assert.match(css, /:focus-visible\s*\{/);
   assert.match(css, /min-height:\s*44px/);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
-  assert.match(css, /@media\s*\(max-width:\s*1024px\)/);
+  assert.match(css, /@media\s*\(max-width:\s*1180px\)/);
   assert.match(css, /@media\s*\(max-width:\s*680px\)/);
   assert.match(css, /\.sr-only\s*\{/);
 });

@@ -1,44 +1,32 @@
 /**
- * @fileoverview Atmospheric dispersion and ventilation-window intelligence using actual
- * hourly modeled Boundary Layer Height (BLH), 10m wind speed, and hourly PM2.5 forecasts.
+ * @fileoverview Atmospheric dispersion & practical activity window engine (Project Chimera v2.5).
  *
- * Scientific discipline:
- * - Never claims a confirmed temperature inversion without vertical temperature-profile data.
- * - Uses the Holzworth/IMD Ventilation Coefficient: VC = BLH (m) * windSpeed (m/s).
- * - Calculates location-specific cleaner outdoor and ventilation windows directly from hourly data.
+ * Upgrades:
+ * - Separates Lowest Modeled Pollution Period (may occur overnight) from Best Practical Daytime Window
+ *   constrained by actual location sunrise/sunset and precipitation checks (FIX 02).
+ * - Never labels surface stagnation as a confirmed radiosonde temperature inversion.
+ * - Computes multi-factor qualitative confidence from variable coverage, resolution, and horizon.
+ * - Rejects negative pollutant concentrations at ingestion (FIX 01 & FIX 07).
  */
 
 import { calculatePollutantSubIndex } from './cpcbAqi.js';
+import { formatProjectedAndDelta, sanitizeConcentration } from './dataIntegrity.js';
 import { clampNumber } from './security.js';
 
-/**
- * Converts wind speed from km/h to m/s.
- * @param {number} kmh
- * @returns {number}
- */
 export function kmhToMs(kmh) {
   return Number((clampNumber(kmh, 0, 250, 0) / 3.6).toFixed(2));
 }
 
-/**
- * Computes atmospheric Ventilation Coefficient (m²/s) = BLH (m) * windSpeed (m/s).
- * Standard IMD/Holzworth thresholds:
- * - < 2,000 m²/s: High Stagnation Risk (severe pollutant trapping)
- * - 2,000–6,000 m²/s: Limited Dispersion (moderate accumulation)
- * - >= 6,000 m²/s: Favorable Dispersion (active vertical/horizontal mixing)
- * @param {number | null} blhMeters
- * @param {number | null} windKmh
- */
 export function computeVentilationCoefficient(blhMeters, windKmh) {
   if (typeof blhMeters !== 'number' || !Number.isFinite(blhMeters) || typeof windKmh !== 'number' || !Number.isFinite(windKmh)) {
-    return { vc: null, windMs: null, category: 'Unavailable', riskLevel: 'unknown' };
+    return { vc: null, windMs: null, category: 'Unknown / Insufficient Evidence', riskLevel: 'unknown' };
   }
   const safeBlh = clampNumber(blhMeters, 20, 6000, 300);
   const windMs = kmhToMs(windKmh);
   const vc = Math.round(safeBlh * windMs);
 
   if (vc < 2000 || (safeBlh < 280 && windMs < 2.0)) {
-    return { vc, windMs, category: 'High Stagnation Risk', riskLevel: 'high' };
+    return { vc, windMs, category: 'Atmospheric Stagnation Risk', riskLevel: 'high' };
   }
   if (vc < 6000) {
     return { vc, windMs, category: 'Limited Dispersion', riskLevel: 'moderate' };
@@ -46,110 +34,191 @@ export function computeVentilationCoefficient(blhMeters, windKmh) {
   return { vc, windMs, category: 'Favorable Dispersion', riskLevel: 'low' };
 }
 
-/**
- * Converts wind direction degrees (0-360) into compass cardinal label.
- * @param {number | null} deg
- */
 export function degreesToCompass(deg) {
   if (typeof deg !== 'number' || !Number.isFinite(deg)) return 'N/A';
   const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
   return dirs[Math.round((((deg % 360) + 360) % 360) / 45) % 8];
 }
 
-/**
- * Formats an ISO local hour string (e.g., "2026-11-23T14:00") to clean 24h label "14:00".
- * @param {string} iso
- */
+function extractHourNumber(iso) {
+  if (typeof iso !== 'string') return null;
+  const m = iso.match(/T(\d{2}):(\d{2})/);
+  return m ? Number(m[1]) + Number(m[2]) / 60 : null;
+}
+
 function formatHour(iso) {
   if (typeof iso !== 'string') return '--:--';
-  const match = iso.match(/T(\d{2}:\d{2})/);
-  return match ? match[1] : iso.slice(-5);
+  const m = iso.match(/T(\d{2}:\d{2})/);
+  return m ? m[1] : iso.slice(-5);
 }
 
 /**
- * Analyzes the next 24 hours of real hourly AQ + weather forecast points.
- * @param {Array<{ time: string, pm25: number | null, pm10?: number | null, no2?: number | null, blh?: number | null, windKmh?: number | null, windDir?: number | null, tempC?: number | null, rhPct?: number | null }>} hourlyForecast
+ * Determines whether an ISO hour falls within practical local daylight hours
+ * using actual sunrise/sunset from Open-Meteo (defaults safely to 06:30–18:30 if unavailable).
+ * @param {string} iso
+ * @param {{ sunriseHour?: number, sunsetHour?: number }} daylight
  */
-export function analyzeDispersionForecast(hourlyForecast) {
-  const validPoints = (Array.isArray(hourlyForecast) ? hourlyForecast : [])
-    .slice(0, 24)
-    .filter((pt) => pt && typeof pt.pm25 === 'number' && Number.isFinite(pt.pm25));
+function isDaytimeHour(iso, daylight) {
+  const hr = extractHourNumber(iso);
+  if (hr === null) return false;
+  const start = Math.max(6, daylight.sunriseHour ?? 6.5);
+  const end = Math.min(20, daylight.sunsetHour ?? 18.5);
+  return hr >= start && hr <= end;
+}
 
-  if (validPoints.length < 6) {
+/**
+ * Evaluates a contiguous 3-hour window from an array of enriched hourly points.
+ */
+function summarizeWindow(slice, referencePm25) {
+  const avgPm25 = sanitizeConcentration(
+    slice.reduce((s, p) => s + p.pm25, 0) / slice.length,
+    1
+  );
+  const vcPoints = slice.filter((p) => typeof p.vc === 'number');
+  const avgVc = vcPoints.length
+    ? Math.round(vcPoints.reduce((s, p) => s + p.vc, 0) / vcPoints.length)
+    : null;
+  const maxPrecipMm = Math.max(0, ...slice.map((p) => (typeof p.precipMm === 'number' ? p.precipMm : 0)));
+  const isDaytime = slice.every((p) => p.isDaytime);
+  const comparison = formatProjectedAndDelta(avgPm25, referencePm25, 'µg/m³');
+
+  return {
+    startHour: slice[0].hourLabel,
+    endHour: slice[slice.length - 1].hourLabel,
+    label: `${slice[0].hourLabel}–${slice[slice.length - 1].hourLabel}`,
+    avgPm25,
+    avgVc,
+    maxPrecipMm: Number(maxPrecipMm.toFixed(1)),
+    isDaytime,
+    projectedText: comparison.projectedText,
+    deltaText: comparison.deltaText,
+    delta: comparison.delta
+  };
+}
+
+/**
+ * Analyzes 24 hours of real hourly AQ + meteorological forecast points.
+ * @param {Array<{ time: string, pm25: number | null, pm10?: number | null, no2?: number | null, blh?: number | null, windKmh?: number | null, windDir?: number | null, tempC?: number | null, rhPct?: number | null, precipMm?: number | null, solarWm2?: number | null }>} hourlyForecast
+ * @param {{ sunriseIso?: string | null, sunsetIso?: string | null, referencePm25?: number | null, gridResolution?: string }} [context]
+ */
+export function analyzeDispersionForecast(hourlyForecast, context = {}) {
+  const sunriseHour = extractHourNumber(context.sunriseIso) ?? 6.5;
+  const sunsetHour = extractHourNumber(context.sunsetIso) ?? 18.5;
+  const daylight = { sunriseHour, sunsetHour };
+
+  const rawPoints = (Array.isArray(hourlyForecast) ? hourlyForecast : []).slice(0, 24);
+  let hasBlh = false;
+  let hasWind = false;
+  let hasPrecip = false;
+  let hasSolar = false;
+
+  const enriched = rawPoints
+    .map((pt) => {
+      if (!pt || typeof pt.time !== 'string') return null;
+      const pm25 = sanitizeConcentration(pt.pm25, 1);
+      if (pm25 === null) return null;
+
+      const blh = typeof pt.blh === 'number' && Number.isFinite(pt.blh) ? Math.round(Math.max(20, pt.blh)) : null;
+      const windKmh = typeof pt.windKmh === 'number' && Number.isFinite(pt.windKmh) ? Number(Math.max(0, pt.windKmh).toFixed(1)) : null;
+      const precipMm = typeof pt.precipMm === 'number' && Number.isFinite(pt.precipMm) ? Number(Math.max(0, pt.precipMm).toFixed(1)) : null;
+      const solarWm2 = typeof pt.solarWm2 === 'number' && Number.isFinite(pt.solarWm2) ? Math.round(Math.max(0, pt.solarWm2)) : null;
+
+      if (blh !== null) hasBlh = true;
+      if (windKmh !== null) hasWind = true;
+      if (precipMm !== null) hasPrecip = true;
+      if (solarWm2 !== null) hasSolar = true;
+
+      const disp = computeVentilationCoefficient(blh, windKmh);
+      const sub = calculatePollutantSubIndex('pm25', pm25);
+
+      return {
+        time: pt.time,
+        hourLabel: formatHour(pt.time),
+        isDaytime: isDaytimeHour(pt.time, daylight),
+        pm25,
+        pm10: sanitizeConcentration(pt.pm10, 1),
+        no2: sanitizeConcentration(pt.no2, 1),
+        indicativePm25Index: sub ? sub.subIndex : null,
+        blh,
+        windKmh,
+        windMs: disp.windMs,
+        windCompass: degreesToCompass(pt.windDir),
+        tempC: typeof pt.tempC === 'number' && Number.isFinite(pt.tempC) ? Number(pt.tempC.toFixed(1)) : null,
+        rhPct: typeof pt.rhPct === 'number' && Number.isFinite(pt.rhPct) ? Math.round(clampNumber(pt.rhPct, 0, 100, 50)) : null,
+        precipMm,
+        solarWm2,
+        vc: disp.vc,
+        dispersionCategory: disp.category,
+        riskLevel: disp.riskLevel
+      };
+    })
+    .filter(Boolean);
+
+  if (enriched.length < 6) {
     return {
       available: false,
-      classification: 'Insufficient hourly forecast data',
+      classification: 'Unknown — Insufficient Atmospheric Forecast Evidence',
       hourly: [],
+      lowestPollutionWindow: null,
+      bestDaytimeWindow: null,
       bestOutdoorWindow: null,
       bestVentilationWindow: null,
       peakAccumulationWindow: null,
+      eveningWatchWindow: null,
+      daylight: { sunriseLabel: formatHour(context.sunriseIso), sunsetLabel: formatHour(context.sunsetIso) },
       trend: 'unavailable',
-      confidence: { level: 'Low', reason: 'Fewer than 6 valid hourly forecast points returned by upstream model.' },
+      trendDeltaPct: 0,
+      confidence: {
+        level: 'Low',
+        factors: ['Fewer than 6 valid hourly forecast points returned by upstream provider.'],
+        reason: 'Insufficient hourly data to compute reliable dispersion or activity windows.'
+      },
       methodologyNote: 'Requires hourly modeled PM2.5, boundary-layer height, and 10m wind speed.'
     };
   }
 
-  let hasBlh = false;
-  let hasWind = false;
-
-  const enriched = validPoints.map((pt) => {
-    const blh = typeof pt.blh === 'number' && Number.isFinite(pt.blh) ? Math.round(pt.blh) : null;
-    const windKmh = typeof pt.windKmh === 'number' && Number.isFinite(pt.windKmh) ? Number(pt.windKmh.toFixed(1)) : null;
-    if (blh !== null) hasBlh = true;
-    if (windKmh !== null) hasWind = true;
-
-    const disp = computeVentilationCoefficient(blh, windKmh);
-    const sub = calculatePollutantSubIndex('pm25', pt.pm25);
-
-    return {
-      time: pt.time,
-      hourLabel: formatHour(pt.time),
-      pm25: Number(pt.pm25.toFixed(1)),
-      pm10: typeof pt.pm10 === 'number' ? Number(pt.pm10.toFixed(1)) : null,
-      no2: typeof pt.no2 === 'number' ? Number(pt.no2.toFixed(1)) : null,
-      indicativePm25Index: sub ? sub.subIndex : null,
-      blh,
-      windKmh,
-      windMs: disp.windMs,
-      windCompass: degreesToCompass(pt.windDir),
-      tempC: typeof pt.tempC === 'number' ? Number(pt.tempC.toFixed(1)) : null,
-      rhPct: typeof pt.rhPct === 'number' ? Math.round(pt.rhPct) : null,
-      vc: disp.vc,
-      dispersionCategory: disp.category,
-      riskLevel: disp.riskLevel
-    };
-  });
-
-  // Identify best contiguous 3-hour cleaner window and worst 3-hour accumulation window
+  const refPm25 = sanitizeConcentration(context.referencePm25, 1) ?? enriched[0].pm25;
   const windowSize = 3;
-  let bestWindow = null;
-  let worstWindow = null;
+
+  let lowestPollutionWindow = null;
+  let bestDaytimeWindow = null;
+  let peakAccumulationWindow = null;
+  let eveningWatchWindow = null;
 
   for (let i = 0; i <= enriched.length - windowSize; i++) {
     const slice = enriched.slice(i, i + windowSize);
-    const avgPm25 = Number((slice.reduce((s, p) => s + p.pm25, 0) / windowSize).toFixed(1));
-    const avgVcPoints = slice.filter((p) => typeof p.vc === 'number');
-    const avgVc = avgVcPoints.length
-      ? Math.round(avgVcPoints.reduce((s, p) => s + p.vc, 0) / avgVcPoints.length)
-      : null;
+    const candidate = summarizeWindow(slice, refPm25);
 
-    const candidate = {
-      startHour: slice[0].hourLabel,
-      endHour: slice[slice.length - 1].hourLabel,
-      avgPm25,
-      avgVc,
-      label: `${slice[0].hourLabel}–${slice[slice.length - 1].hourLabel}`
-    };
-
-    if (!bestWindow || candidate.avgPm25 < bestWindow.avgPm25) {
-      bestWindow = candidate;
+    if (!lowestPollutionWindow || candidate.avgPm25 < lowestPollutionWindow.avgPm25) {
+      lowestPollutionWindow = candidate;
     }
-    if (!worstWindow || candidate.avgPm25 > worstWindow.avgPm25) {
-      worstWindow = candidate;
+    if (!peakAccumulationWindow || candidate.avgPm25 > peakAccumulationWindow.avgPm25) {
+      peakAccumulationWindow = candidate;
+    }
+
+    // Practical daytime window: strictly within local sunrise–sunset, preferring dry hours
+    if (candidate.isDaytime) {
+      const candidateDry = candidate.maxPrecipMm < 1.5;
+      const bestDry = bestDaytimeWindow ? bestDaytimeWindow.maxPrecipMm < 1.5 : false;
+      if (
+        !bestDaytimeWindow ||
+        (candidateDry && !bestDry) ||
+        (candidateDry === bestDry && candidate.avgPm25 < bestDaytimeWindow.avgPm25)
+      ) {
+        bestDaytimeWindow = candidate;
+      }
+    }
+
+    // Evening / Overnight watch window (starts 18:00–05:00) for accurate Evening Recovery guidance
+    const startHr = extractHourNumber(slice[0].time);
+    if (startHr !== null && (startHr >= 18 || startHr <= 5)) {
+      if (!eveningWatchWindow || candidate.avgPm25 > eveningWatchWindow.avgPm25) {
+        eveningWatchWindow = candidate;
+      }
     }
   }
 
-  // Trend over next 6 hours vs current hour
+  // Next 6-hour trend vs current hour
   const currentPm25 = enriched[0].pm25;
   const futureSlice = enriched.slice(3, Math.min(9, enriched.length));
   const futureAvg = futureSlice.reduce((s, p) => s + p.pm25, 0) / futureSlice.length;
@@ -159,41 +228,66 @@ export function analyzeDispersionForecast(hourlyForecast) {
   if (deltaPct <= -12) trend = 'improving';
   else if (deltaPct >= 12) trend = 'worsening';
 
-  // Ventilation safety check: only recommend open-window flushing if lowest PM2.5 is meaningfully lower & not severe
-  const ventilationSuitable = bestWindow && bestWindow.avgPm25 <= 90;
-  const bestVentilationWindow = bestWindow
+  // Ventilation recommendation always prefers practical daytime window so users aren't told to open windows at 2 AM
+  const ventTarget = bestDaytimeWindow || lowestPollutionWindow;
+  const ventilationSuitable = ventTarget && ventTarget.avgPm25 <= 60;
+  const bestVentilationWindow = ventTarget
     ? {
-        ...bestWindow,
+        ...ventTarget,
         suitableForOpenFlush: ventilationSuitable,
         guidance: ventilationSuitable
-          ? `Lowest modeled PM2.5 (${bestWindow.avgPm25} µg/m³) occurs ${bestWindow.label}; suitable for brief cross-ventilation.`
-          : `Even the cleanest forecasted window (${bestWindow.label}) averages ${bestWindow.avgPm25} µg/m³ PM2.5; limit open-window flushing to 10–15 minutes to clear indoor CO₂ and rely on mechanical HEPA filtration.`
+          ? `Best practical daytime window is ${ventTarget.label} (Projected PM2.5: ${ventTarget.avgPm25} µg/m³). Suitable for brief cross-ventilation${ventTarget.maxPrecipMm >= 1.5 ? ' once rain clears' : ''}.`
+          : `Best daytime window (${ventTarget.label}) still averages ${ventTarget.avgPm25} µg/m³ PM2.5. Keep open-window flushing to 10–15 minutes to control indoor CO₂ and rely on mechanical True HEPA filtration.`
       }
     : null;
 
-  const confidence = hasBlh && hasWind
-    ? {
-        level: 'Moderate (Model-Based)',
-        reason: 'Combines hourly CAMS particulate forecasts (~40 km global grid) with modeled boundary-layer height and 10m wind speed. Local street-level spikes and unmodeled biomass burning can cause actual readings to differ.'
-      }
-    : {
-        level: 'Low–Moderate (AQ-Only Model)',
-        reason: 'Atmospheric boundary-layer height or wind telemetry was partially unavailable; windows reflect modeled PM2.5 trends only.'
-      };
+  // Multi-factor scientific confidence framework (no arbitrary fake percentages)
+  const missingVars = [];
+  if (!hasBlh) missingVars.push('boundary-layer height');
+  if (!hasWind) missingVars.push('10m wind speed');
+  if (!hasPrecip) missingVars.push('precipitation');
+  if (!hasSolar) missingVars.push('solar radiation');
+
+  const confidenceFactors = [
+    `Variable coverage: ${hasBlh && hasWind ? 'PM2.5, BLH, and 10m wind present' : `Missing ${missingVars.join(', ')}`}.`,
+    `Spatial resolution: ${context.gridResolution || 'Regional/Global CAMS model grid'} (averages over wide grid cells; cannot resolve street-canyon spikes).`,
+    'Forecast horizon: Reliability is highest in hours 1–6 and decreases toward hours 18–24.',
+    'Vertical profile: No local radiosonde temperature profile; stagnation risk is inferred from surface BLH × wind speed.'
+  ];
+
+  const confidenceLevel = hasBlh && hasWind ? 'Moderate (Model-Indicated)' : 'Low–Moderate (Partial Variables)';
+
+  // Classification strictly follows vertical-evidence discipline
+  const hasSevereStagnation = enriched.some((h) => h.riskLevel === 'high');
+  const classification = !hasBlh || !hasWind
+    ? 'Limited Atmospheric Evidence (Pollutant Model Only)'
+    : hasSevereStagnation
+      ? 'General Atmospheric Stagnation Risk (Modeled BLH & Wind — Not Confirmed Radiosonde Inversion)'
+      : 'Dispersion Conditions Estimate (Modeled BLH & Wind)';
 
   return {
     available: true,
-    classification: hasBlh
-      ? 'Dispersion-Risk Estimate (Modeled BLH & Wind — Not Radiosonde Inversion)'
-      : 'Hourly Modeled PM2.5 Forecast (No Vertical Profile)',
+    classification,
     hourly: enriched,
-    bestOutdoorWindow: bestWindow,
+    lowestPollutionWindow,
+    bestDaytimeWindow,
+    // Keep bestOutdoorWindow pointing strictly to practical daytime window (never 01:00–03:00)
+    bestOutdoorWindow: bestDaytimeWindow,
     bestVentilationWindow,
-    peakAccumulationWindow: worstWindow,
+    peakAccumulationWindow,
+    eveningWatchWindow: eveningWatchWindow || peakAccumulationWindow,
+    daylight: {
+      sunriseLabel: formatHour(context.sunriseIso),
+      sunsetLabel: formatHour(context.sunsetIso)
+    },
     trend,
     trendDeltaPct: deltaPct,
-    confidence,
+    confidence: {
+      level: confidenceLevel,
+      factors: confidenceFactors,
+      reason: confidenceFactors.join(' ')
+    },
     methodologyNote:
-      'Dispersion risk is derived from the Ventilation Coefficient (VC = Boundary Layer Height × 10m Wind Speed). Because vertical radiosonde temperature profiles are not measured here, trapping periods are classified as stagnation/dispersion risk rather than confirmed thermal inversions.'
+      'Dispersion conditions use the Ventilation Coefficient (VC = Boundary Layer Height × 10m Wind Speed) alongside local sunrise/sunset and precipitation. Lowest overnight pollution periods are separated from practical daytime activity windows.'
   };
 }

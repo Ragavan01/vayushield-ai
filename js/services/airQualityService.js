@@ -1,22 +1,24 @@
 /**
- * @fileoverview Live Atmospheric & Air Quality Data Service.
- * Combines Open-Meteo Air Quality (CAMS modeled pollutants) with Open-Meteo Weather Forecast
- * (Boundary Layer Height, wind speed/direction, temperature, humidity).
- *
- * Guarantees:
- * - Full provenance metadata (provider, sourceType, grid resolution, timestamps, freshness)
- * - Real 24h/8h rolling averages computed from hourly series for CPCB-derived AQI
- * - Historical trend queries for 24h (1d), 7d, and 30d
- * - In-flight request deduplication + bounded retry with backoff
- * - NEVER silently substitutes another city's data on network failure
+ * @fileoverview Resilient Dual-API Atmospheric Data Service (Project Chimera v2.5).
+ * - Fetches Open-Meteo Air Quality (CAMS modeled pollutants) + Weather Forecast
+ *   (BLH, wind, temperature, humidity, precipitation, solar radiation, daily sunrise/sunset).
+ * - Slices exact 24h / 7d / 30d history horizons (fixes 32-point overrun).
+ * - Evaluates true measurement freshness via dataIntegrity.js.
+ * - Preserves last valid cache for the SAME location with an explicit Stale warning if an upstream retry fails,
+ *   while NEVER substituting a different city's data.
  */
 
 import { calculateCpcbAqi, coUgToMg, computeRollingAverage } from '../core/cpcbAqi.js';
+import {
+  createEnvironmentalReading,
+  evaluateDataFreshness,
+  sanitizeConcentration
+} from '../core/dataIntegrity.js';
 import { analyzeDispersionForecast } from '../core/dispersionEngine.js';
 import { clampNumber, sanitizeText } from '../core/security.js';
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
-const REQUEST_TIMEOUT_MS = 8_000;
+const REQUEST_TIMEOUT_MS = 8_500;
 const MAX_RETRIES = 1;
 
 /** @type {Map<string, { expiresAt: number, data: any }>} */
@@ -67,11 +69,6 @@ async function fetchJsonWithRetry(url, fetchImpl, retries = MAX_RETRIES) {
   throw lastError || new Error('Upstream request failed');
 }
 
-/**
- * Resolves a city query to geographic coordinates using Open-Meteo Geocoding API.
- * @param {string} query
- * @param {{ fetchImpl?: typeof fetch }} [options]
- */
 export async function geocodeCity(query, options = {}) {
   const clean = sanitizeText(query, 80);
   if (clean.length < 2) return null;
@@ -93,40 +90,33 @@ export async function geocodeCity(query, options = {}) {
   };
 }
 
-/**
- * Finds the index in an ISO hourly array closest to the current timestamp string.
- * @param {string[]} times
- * @param {string | undefined} currentIso
- */
 function findCurrentHourIndex(times, currentIso) {
   if (!Array.isArray(times) || times.length === 0) return 0;
   if (currentIso) {
-    const prefix = currentIso.slice(0, 13); // "YYYY-MM-DDTHH"
+    const prefix = currentIso.slice(0, 13);
     const exactIdx = times.findIndex((t) => typeof t === 'string' && t.startsWith(prefix));
     if (exactIdx >= 0) return exactIdx;
   }
   return Math.max(0, Math.min(24, times.length - 1));
 }
 
-/**
- * Fetches live modeled AQ + hourly weather dispersion + historical series (1d, 7d, or 30d).
- * Throws an explicit error if upstream is unreachable rather than fabricating fake telemetry.
- *
- * @param {{ name: string, region?: string, lat: number, lon: number }} location
- * @param {{ pastDays?: 1 | 7 | 30, fetchImpl?: typeof fetch, now?: () => number }} [options]
- */
 export async function fetchAirIntelligence(location, options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const now = options.now || (() => Date.now());
   const pastDays = [1, 7, 30].includes(options.pastDays) ? options.pastDays : 1;
+  const forceRefresh = options.forceRefresh === true;
 
   const lat = Number(clampNumber(location.lat, -90, 90, 28.6139).toFixed(4));
   const lon = Number(clampNumber(location.lon, -180, 180, 77.209).toFixed(4));
   const cacheKey = `${lat},${lon}:${pastDays}`;
 
   const cached = responseCache.get(cacheKey);
-  if (cached && cached.expiresAt > now()) {
-    return { ...cached.data, metadata: { ...cached.data.metadata, freshness: 'Cached (<10 min)' } };
+  if (!forceRefresh && cached && cached.expiresAt > now()) {
+    const freshness = evaluateDataFreshness(cached.data.current.timestamp, now(), { sourceType: 'modeled' });
+    return {
+      ...cached.data,
+      metadata: { ...cached.data.metadata, freshness: freshness.label, freshnessState: freshness, fromCache: true }
+    };
   }
 
   if (inflightRequests.has(cacheKey)) {
@@ -134,8 +124,8 @@ export async function fetchAirIntelligence(location, options = {}) {
   }
 
   const work = (async () => {
-    const aqUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&hourly=pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,ozone,us_aqi,european_aqi&current=pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,ozone,us_aqi&past_days=${pastDays}&forecast_days=2&timezone=auto`;
-    const wxUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,boundary_layer_height&current=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m&past_days=1&forecast_days=2&timezone=auto`;
+    const aqUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&hourly=pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,ozone,us_aqi&current=pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,ozone,us_aqi&past_days=${pastDays}&forecast_days=2&timezone=auto`;
+    const wxUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,boundary_layer_height,precipitation,shortwave_radiation&daily=sunrise,sunset&current=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m&past_days=1&forecast_days=2&timezone=auto`;
 
     const [aqResult, wxResult] = await Promise.allSettled([
       fetchJsonWithRetry(aqUrl, fetchImpl),
@@ -143,6 +133,23 @@ export async function fetchAirIntelligence(location, options = {}) {
     ]);
 
     if (aqResult.status !== 'fulfilled' || !aqResult.value?.hourly?.time?.length) {
+      // Stale-while-error ONLY for the exact same coordinates/key — never another city
+      if (cached) {
+        const staleFreshness = evaluateDataFreshness(cached.data.current.timestamp, now(), {
+          sourceType: 'modeled',
+          isStaleFallback: true
+        });
+        return {
+          ...cached.data,
+          metadata: {
+            ...cached.data.metadata,
+            freshness: staleFreshness.label,
+            freshnessState: staleFreshness,
+            isStaleFallback: true,
+            staleWarning: 'Live refresh failed; displaying the last valid cached reading for this exact location.'
+          }
+        };
+      }
       throw new Error('Open-Meteo Air Quality telemetry is currently unavailable for this location.');
     }
 
@@ -152,7 +159,7 @@ export async function fetchAirIntelligence(location, options = {}) {
     const times = aq.hourly.time;
     const nowIdx = findCurrentHourIndex(times, aq.current?.time);
 
-    // Slice trailing 24 hours and 8 hours ending at current hour for CPCB rolling-average compliance
+    // Trailing 24h / 8h rolling averages for CPCB compliance
     const trailing24Start = Math.max(0, nowIdx - 23);
     const trailing8Start = Math.max(0, nowIdx - 7);
 
@@ -176,64 +183,96 @@ export async function fetchAirIntelligence(location, options = {}) {
       { sourceType: 'modeled', averagingValidated: pm25_24h.average !== null }
     );
 
-    // Build next 24-hour forecast aligned with weather dispersion variables
     const wxIndexByTime = new Map();
     if (wx?.hourly?.time) {
       wx.hourly.time.forEach((t, i) => wxIndexByTime.set(t, i));
     }
 
+    const isEuropeDomain = lat >= 30 && lat <= 72 && lon >= -25 && lon <= 45;
+    const gridResolution = isEuropeDomain ? '~11 km (CAMS Europe domain)' : '~40 km (CAMS Global 0.4° domain)';
+
+    // Next 24-hour forecast points
     const forecastPoints = [];
     for (let i = nowIdx; i < Math.min(times.length, nowIdx + 24); i++) {
       const t = times[i];
       const wIdx = wxIndexByTime.get(t);
       forecastPoints.push({
         time: t,
-        pm25: aq.hourly.pm2_5?.[i] ?? null,
-        pm10: aq.hourly.pm10?.[i] ?? null,
-        no2: aq.hourly.nitrogen_dioxide?.[i] ?? null,
+        pm25: sanitizeConcentration(aq.hourly.pm2_5?.[i], 1),
+        pm10: sanitizeConcentration(aq.hourly.pm10?.[i], 1),
+        no2: sanitizeConcentration(aq.hourly.nitrogen_dioxide?.[i], 1),
         blh: wIdx !== undefined ? wx.hourly.boundary_layer_height?.[wIdx] ?? null : null,
         windKmh: wIdx !== undefined ? wx.hourly.wind_speed_10m?.[wIdx] ?? null : null,
         windDir: wIdx !== undefined ? wx.hourly.wind_direction_10m?.[wIdx] ?? null : null,
         tempC: wIdx !== undefined ? wx.hourly.temperature_2m?.[wIdx] ?? null : null,
-        rhPct: wIdx !== undefined ? wx.hourly.relative_humidity_2m?.[wIdx] ?? null : null
+        rhPct: wIdx !== undefined ? wx.hourly.relative_humidity_2m?.[wIdx] ?? null : null,
+        precipMm: wIdx !== undefined ? wx.hourly.precipitation?.[wIdx] ?? null : null,
+        solarWm2: wIdx !== undefined ? wx.hourly.shortwave_radiation?.[wIdx] ?? null : null
       });
     }
 
-    const dispersion = analyzeDispersionForecast(forecastPoints);
+    // Match today's sunrise/sunset from daily weather array
+    const todayDatePrefix = (aq.current?.time || times[nowIdx] || '').slice(0, 10);
+    const sunriseIso = wx?.daily?.sunrise?.find((s) => s.startsWith(todayDatePrefix)) || wx?.daily?.sunrise?.[0] || null;
+    const sunsetIso = wx?.daily?.sunset?.find((s) => s.startsWith(todayDatePrefix)) || wx?.daily?.sunset?.[0] || null;
 
-    // Build historical trend series up to nowIdx
+    const currentPm25 = sanitizeConcentration(aq.current?.pm2_5, 1);
+    const dispersion = analyzeDispersionForecast(forecastPoints, {
+      sunriseIso,
+      sunsetIso,
+      referencePm25: currentPm25 ?? pm25_24h.average,
+      gridResolution
+    });
+
+    // Exact historical slice: pastDays * 24 hours ending at nowIdx (fixes 32-point 24h overrun)
+    // Preserves null slots explicitly so charts render visible missing-data gaps
+    const targetHistoryHours = pastDays * 24;
+    const histStart = Math.max(0, nowIdx - (targetHistoryHours - 1));
     const historyPoints = [];
-    for (let i = 0; i <= nowIdx; i++) {
-      if (typeof aq.hourly.pm2_5?.[i] === 'number') {
-        historyPoints.push({
-          time: times[i],
-          pm25: Number(aq.hourly.pm2_5[i].toFixed(1)),
-          pm10: typeof aq.hourly.pm10?.[i] === 'number' ? Number(aq.hourly.pm10[i].toFixed(1)) : null
-        });
-      }
+    for (let i = histStart; i <= nowIdx; i++) {
+      historyPoints.push({
+        time: times[i],
+        pm25: sanitizeConcentration(aq.hourly.pm2_5?.[i], 1),
+        pm10: sanitizeConcentration(aq.hourly.pm10?.[i], 1)
+      });
     }
 
-    const isEuropeApprox = lat >= 30 && lat <= 72 && lon >= -25 && lon <= 45;
+    const retrievalIso = new Date(now()).toISOString();
+    const measurementIso = aq.current?.time || times[nowIdx] || null;
+    const freshnessState = evaluateDataFreshness(measurementIso, now(), { sourceType: 'modeled' });
+
+    const locMeta = {
+      name: sanitizeText(location.name, 60) || 'Selected Location',
+      region: sanitizeText(location.region, 80) || `${lat}°, ${lon}°`,
+      lat,
+      lon,
+      timezone: aq.timezone || 'UTC'
+    };
+
+    const readings = [
+      createEnvironmentalReading({ pollutant: 'PM2.5', value: pm25_24h.average, unit: 'µg/m³', source: 'Open-Meteo / CAMS', sourceType: 'modeled', location: locMeta, measurementTime: measurementIso, retrievalTime: retrievalIso, averagingPeriod: '24-hr rolling', spatialResolution: gridResolution, completenessPct: pm25_24h.completenessPct }),
+      createEnvironmentalReading({ pollutant: 'PM10', value: pm10_24h.average, unit: 'µg/m³', source: 'Open-Meteo / CAMS', sourceType: 'modeled', location: locMeta, measurementTime: measurementIso, retrievalTime: retrievalIso, averagingPeriod: '24-hr rolling', spatialResolution: gridResolution, completenessPct: pm10_24h.completenessPct }),
+      createEnvironmentalReading({ pollutant: 'NO2', value: no2_24h.average, unit: 'µg/m³', source: 'Open-Meteo / CAMS', sourceType: 'modeled', location: locMeta, measurementTime: measurementIso, retrievalTime: retrievalIso, averagingPeriod: '24-hr rolling', spatialResolution: gridResolution, completenessPct: no2_24h.completenessPct }),
+      createEnvironmentalReading({ pollutant: 'SO2', value: so2_24h.average, unit: 'µg/m³', source: 'Open-Meteo / CAMS', sourceType: 'modeled', location: locMeta, measurementTime: measurementIso, retrievalTime: retrievalIso, averagingPeriod: '24-hr rolling', spatialResolution: gridResolution, completenessPct: so2_24h.completenessPct }),
+      createEnvironmentalReading({ pollutant: 'O3', value: o3_8h.average, unit: 'µg/m³', source: 'Open-Meteo / CAMS', sourceType: 'modeled', location: locMeta, measurementTime: measurementIso, retrievalTime: retrievalIso, averagingPeriod: '8-hr rolling', spatialResolution: gridResolution, completenessPct: o3_8h.completenessPct }),
+      createEnvironmentalReading({ pollutant: 'CO', value: coMg_8h, unit: 'mg/m³', source: 'Open-Meteo / CAMS', sourceType: 'modeled', location: locMeta, measurementTime: measurementIso, retrievalTime: retrievalIso, averagingPeriod: '8-hr rolling', spatialResolution: gridResolution, completenessPct: coRaw_8h.completenessPct })
+    ];
+
     const record = {
-      location: {
-        name: sanitizeText(location.name, 60) || 'Selected Location',
-        region: sanitizeText(location.region, 80) || `${lat}°, ${lon}°`,
-        lat,
-        lon,
-        timezone: aq.timezone || 'UTC'
-      },
+      location: locMeta,
+      readings,
       current: {
-        timestamp: aq.current?.time || times[nowIdx],
-        pm25: aq.current?.pm2_5 ?? null,
-        pm10: aq.current?.pm10 ?? null,
-        no2: aq.current?.nitrogen_dioxide ?? null,
-        so2: aq.current?.sulphur_dioxide ?? null,
-        o3: aq.current?.ozone ?? null,
+        timestamp: measurementIso,
+        pm25: currentPm25,
+        pm10: sanitizeConcentration(aq.current?.pm10, 1),
+        no2: sanitizeConcentration(aq.current?.nitrogen_dioxide, 1),
+        so2: sanitizeConcentration(aq.current?.sulphur_dioxide, 1),
+        o3: sanitizeConcentration(aq.current?.ozone, 1),
         coMg: aq.current?.carbon_monoxide != null ? coUgToMg(aq.current.carbon_monoxide) : null,
-        usAqi: aq.current?.us_aqi ?? null,
-        tempC: wx?.current?.temperature_2m ?? null,
-        rhPct: wx?.current?.relative_humidity_2m ?? null,
-        windKmh: wx?.current?.wind_speed_10m ?? null,
+        usAqi: sanitizeConcentration(aq.current?.us_aqi, 0),
+        tempC: typeof wx?.current?.temperature_2m === 'number' ? Number(wx.current.temperature_2m.toFixed(1)) : null,
+        rhPct: typeof wx?.current?.relative_humidity_2m === 'number' ? Math.round(wx.current.relative_humidity_2m) : null,
+        windKmh: typeof wx?.current?.wind_speed_10m === 'number' ? Number(wx.current.wind_speed_10m.toFixed(1)) : null,
         windDir: wx?.current?.wind_direction_10m ?? null
       },
       rollingAverages: {
@@ -248,16 +287,21 @@ export async function fetchAirIntelligence(location, options = {}) {
       dispersion,
       history: {
         pastDays,
+        expectedHours: targetHistoryHours,
         points: historyPoints
       },
       metadata: {
         provider: 'Open-Meteo / Copernicus CAMS (CC-BY 4.0)',
         weatherProvider: wx ? 'Open-Meteo Weather Forecast (ECMWF/GFS)' : 'Unavailable',
         sourceType: 'Modeled Atmospheric Grid (Not Ground Station)',
-        gridResolution: isEuropeApprox ? '~11 km (CAMS Europe)' : '~40 km (CAMS Global)',
+        gridResolution,
+        temporalResolution: 'Hourly model valid steps (12-hr CAMS cycle)',
         averagingNote: 'CPCB-derived index uses 24-hr rolling means (PM2.5/PM10/NO₂/SO₂) and 8-hr rolling means (O₃/CO).',
-        fetchedAt: new Date(now()).toISOString(),
-        freshness: 'Live'
+        fetchedAt: retrievalIso,
+        freshness: freshnessState.label,
+        freshnessState,
+        isStaleFallback: false,
+        fromCache: false
       }
     };
 

@@ -1,25 +1,30 @@
-# VayuShield AI — Urban Air Quality & Winter Smog Assistant
+# VayuShield — Urban Air Quality & Atmospheric Dispersion Intelligence
 
-> Built for **PromptWars Virtual — Main Challenge 06: Urban Air Quality Assistant**
+> **Understand the air. Predict the risk. Protect your environment.**
 
-**VayuShield AI** is a GenAI-powered assistant that helps families and communities navigate severe winter smog and urban air pollution through **live AQI telemetry**, **24-hour thermal inversion scheduling**, **low-emission daily routines**, **budget-tiered indoor air quality (IAQ) hacks**, and an interactive **Choice-to-Impact Simulator** powered by **Google Gemini 2.5 Flash**.
+**Live Production App:** [https://vayushield-ai-five.vercel.app/](https://vayushield-ai-five.vercel.app/)
 
-**Live Demo:** `[PASTE YOUR REAL https://....vercel.app URL HERE AFTER DEPLOY]`
+VayuShield is a scientific urban air quality, atmospheric dispersion, and indoor air-engineering platform combining live Copernicus CAMS / Open-Meteo telemetry, validated 8-pollutant Indian CPCB NAQI calculations, steady-state indoor filtration physics, daylight-aware daily scheduling, and a server-proxied **Google Gemini 2.5 Flash** coach.
 
 ---
 
-## Architecture & Data Flow
+## Updated Architecture (v2.5 Chimera)
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    VayuShield AI (Zero-Bloat Vanilla ESM)               │
-│  index.html (Strict Semantic WCAG 2.1)  +  styles/main.css (No CDN JS)  │
-└───────────────┬─────────────────────────────────────────┬───────────────┘
-                │                                         │
-                ▼                                         ▼
-┌───────────────────────────────┐        ┌────────────────────────────────┐
-│   Pure Core Engines (js/core) │        │    External & Serverless APIs  │
-│ • aqiEngine.js (CPCB + Curves)│        │ • /api/gemini.js (Rate-Limited │
-│ • recommendationEngine.js     │        │   Gemini 2.5 Flash Proxy)      │
-│ • security.js (Zero-XSS DOM)  │        │ • Open-Meteo Live AQI + Geo    │
-└───────────────────────────────┘        └────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│            VayuShield Frontend (Zero-Bloat Vanilla ESM, WCAG 2.2 AA)       │
+│  index.html + styles/main.css + js/app.js (Zero innerHTML / Zero inline)   │
+└───────────────┬──────────────────────────────────────────┬─────────────────┘
+                │                                          │
+                ▼                                          ▼
+┌────────────────────────────────────────┐  ┌────────────────────────────────┐
+│       Pure Scientific Core (js/core)   │  │     Services & Server Proxy    │
+│ • dataIntegrity.js (Freshness & Units) │  │ • airQualityService.js (Dual   │
+│ • cpcbAqi.js (8-Pollutant CPCB NAQI)   │  │   Open-Meteo AQ + Meteorology) │
+│ • dispersionEngine.js (BLH, VC, Sun)   │  │ • aiAssistantService.js        │
+│ • indoorPhysics.js (Mass-Balance CADR) │  │ • /api/gemini.js (Rate-Limited │
+│ • impactModel.js (Parameterized CO2)   │  │   Server-Side Gemini Proxy)    │
+│ • routineEngine.js (Daylight Schedule) │  └────────────────────────────────┘
+│ • communityModeration.js (PII Guard)   │
+│ • security.js (Zero-XSS DOM Helpers)   │
+└────────────────────────────────────────┘
