@@ -4,7 +4,7 @@
 
 **VayuShield AI** is a GenAI-powered assistant that helps families and communities navigate severe winter smog and urban air pollution through **live AQI telemetry**, **24-hour thermal inversion scheduling**, **low-emission daily routines**, **budget-tiered indoor air quality (IAQ) hacks**, and an interactive **Choice-to-Impact Simulator** powered by **Google Gemini 2.5 Flash**.
 
-**Live Demo:** `[PASTE YOUR REAL https://....vercel.app URL HERE AFTER DEPLOY]`
+**Live Demo:** ` PASTE YOUR REAL https://....vercel.app URL HERE AFTER DEPLOY](https://vayushield-ai-five.vercel.app `
 
 ---
 
