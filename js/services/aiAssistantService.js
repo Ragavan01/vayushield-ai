@@ -1,355 +1,623 @@
 /**
- * @fileoverview VayuShield AI Coach client.
- * - Forwards full telemetry, yesterday's 24h average, dispersion metrics, and room physics
- *   to `/api/gemini` without ever coercing missing values to zero.
- * - Provides an Intent-Routed Deterministic Grounded Engine so even if the server proxy is
- *   offline or unconfigured, every prompt ("hi", "Compare today vs. yesterday", "Best outdoor window",
- *   "Room CADR", etc.) receives a distinct, tailored answer instead of identical boilerplate.
+ * @fileoverview VayuShield AI Coach Client Service (Project ORACLE).
+ * - Builds strictly validated nested environmental context preserving null values
+ * - Manages session-level multi-turn conversation history with automatic location-change reset
+ * - Classifies user prompts into 13 environmental intents without keyword collisions
+ * - Supports AbortSignal cancellation (Stop Generation) and clean offline fallback metadata
  */
 
 import { normalizeProfile } from '../core/impactModel.js';
 import { sanitizeText } from '../core/security.js';
 
-const CLIENT_TIMEOUT_MS = 15_000;
+const CLIENT_TIMEOUT_MS = 18_000;
+const MAX_STORED_TURNS = 10;
+const MAX_SENT_HISTORY_MESSAGES = 6;
 
 export const COACH_PROMPT_TEMPLATES = Object.freeze([
   Object.freeze({
     id: 'explain-aqi',
     label: 'Explain my current air quality',
-    prompt: 'Explain our current CPCB-derived AQI estimate, which pollutant is driving it, and how reliable this modeled reading is.'
+    prompt: 'Explain the current air-quality information for my selected location and clearly identify which information is modeled.'
   }),
   Object.freeze({
     id: 'pollution-drivers',
-    label: 'What is causing today’s pollution?',
-    prompt: 'Based on our primary pollutant, boundary-layer height, and wind speed, what dispersion conditions are shaping today’s air quality?'
+    label: 'What is driving pollution?',
+    prompt: 'What pollutant and meteorological dispersion factors are driving today’s air quality?'
   }),
   Object.freeze({
     id: 'compare-yesterday',
     label: 'Compare today vs. yesterday',
-    prompt: 'Compare today’s 24-hour rolling PM2.5 against yesterday’s 24-hour average and the next 6-hour forecast trend.'
+    prompt: 'Compare today’s 24-hour rolling PM2.5 against yesterday’s average and the next 6-hour forecast trend.'
   }),
   Object.freeze({
-    id: 'daytime-window',
-    label: 'When is outdoor activity most practical?',
-    prompt: 'When is the most practical daytime window for outdoor activity or ventilation, and why should overnight lows not be used for exercise?'
+    id: 'outdoor-window',
+    label: 'Practical outdoor window',
+    prompt: 'When is a practical daytime outdoor activity window today, and why are overnight lows excluded?'
   }),
   Object.freeze({
     id: 'improve-indoor',
-    label: 'How can I improve my indoor air?',
-    prompt: 'Give practical steps to improve indoor air quality for our household profile and kitchen fuel setup without relying on ozone ionizers.'
+    label: 'Improve indoor air',
+    prompt: 'How can I improve my indoor air quality given our kitchen fuel setup and current outdoor PM2.5?'
   }),
   Object.freeze({
     id: 'room-cadr',
-    label: 'What filtration capacity does my room need?',
-    prompt: 'Explain the mass-balance CADR and filter-efficiency calculation for my room dimensions and compare zero-cost, DIY, and True H13 options.'
+    label: 'Explain my room’s CADR',
+    prompt: 'Explain my room’s CADR and ACH sizing calculation and compare zero-cost, DIY HEPA, and True H13 options.'
+  }),
+  Object.freeze({
+    id: 'household-today',
+    label: 'What should my household do?',
+    prompt: 'What practical steps should our household take today across commute, ventilation, and evening protection?'
+  }),
+  Object.freeze({
+    id: 'forecast-uncertainty',
+    label: 'Explain forecast uncertainty',
+    prompt: 'Explain the data limitations, spatial grid resolution, and forecast uncertainty for this location.'
   })
 ]);
 
-function detectQuestionIntent(q) {
-  const lower = String(q || '').toLowerCase().trim();
-  if (/^(hi|hello|hey|yo|good morning|good evening|namaste|vanakkam|help|\?)[!. ]*$/.test(lower) || lower.length <= 4) {
+/**
+ * Classifies a user prompt into 1 of 13 structured intents with deterministic priority
+ * (prevents "improve indoor air" or "compare DIY vs H13 CADR" from being misrouted to yesterday trends).
+ */
+export function classifyCoachIntent(question, historyLength = 0) {
+  const lower = String(question || '').toLowerCase().trim();
+
+  if (/^(hi|hello|hey|yo|namaste|vanakkam|good morning|good evening|help|\?)[!., ]*$/.test(lower) || lower.length <= 4) {
     return 'greeting';
   }
-  if (/yesterday|compare|trend|worse|better|improv/.test(lower)) {
-    return 'compare-yesterday';
+  if (/\b(cadr|ach|purifier|hepa|merv|filter|filtration|sizing|capacity|room volume|bigger purifier|diy box)\b/.test(lower)) {
+    return 'filtration-cadr';
   }
-  if (/window|outdoor|walk|run|exercise|ventilat|night|overnight|sunrise|sunset|when/.test(lower)) {
-    return 'daytime-window';
+  if (/\b(commute|mask|n95|ffp2|kf94|two-wheeler|scooter|bike|car|metro|bus|school run|roadside)\b/.test(lower)) {
+    return 'commute-protection';
   }
-  if (/cadr|ach|room|volume|purifier|hepa|merv|sizing|capacity|sqft|sq\.ft/.test(lower)) {
-    return 'room-cadr';
+  if (/\b(outdoor|outside|walk|jog|run|exercise|workout|sport|daytime window|practical.*window|overnight|sunrise|sunset)\b/.test(lower)) {
+    return 'outdoor-activity';
   }
-  if (/indoor|kitchen|cook|lpg|induction|chimney|seal|house|home/.test(lower)) {
-    return 'improve-indoor';
+  if (/\b(indoors?|inside|open .*window|windows|ventilat|kitchen|cook|lpg|induction|chimney|seal|incense|room air)\b/.test(lower)) {
+    return 'indoor-air';
   }
-  if (/caus|driver|wind|boundary|blh|stagnat|inversion|dispersion|why/.test(lower)) {
-    return 'pollution-drivers';
+  if (/\b(yesterday|tomorrow|next 6|6-hour|6h|getting better|getting worse|is the air improving|trend|forecast|uncertaint|confidence|limitation)\b/.test(lower)) {
+    return 'forecast-interpretation';
   }
-  if (/commute|mask|n95|bike|two-wheeler|car|travel|school/.test(lower)) {
-    return 'commute';
+  if (/\b(dispersion|boundary[- ]?layer|\bblh\b|ventilation coefficient|\bvc\b|stagnation|inversion|wind|mixing)\b/.test(lower)) {
+    return 'atmospheric-dispersion';
   }
-  return 'explain-aqi';
+  if (/\b(causing|causes|driving|driver|why is aqi|why is pollution|source of)\b/.test(lower)) {
+    return 'pollution-causes';
+  }
+  if (/\b(pm2\.?5|pm10|no2|so2|ozone|\bo3\b|\bco\b|nh3|lead|\bpb\b|who 2021|sub-index)\b/.test(lower)) {
+    return 'pollutant-analysis';
+  }
+  if (/\b(co2|carbon|emissions|savings|carpool|sustainable|impact simulator)\b/.test(lower)) {
+    return 'environmental-impact';
+  }
+  if (/\b(household|family|kids|children|senior|elderly|asthma|what should .* do|routine)\b/.test(lower)) {
+    return 'household-advice';
+  }
+  if (/\b(aqi|air quality|index|bad|safe|severe|poor|moderate|good|satisfactory|calculation|methodology|modeled)\b/.test(lower)) {
+    return 'aqi-explanation';
+  }
+  if (historyLength > 0 && /\b(it|its|that|those|them|simpler|simple terms|explain more|what if|how about|why|elaborate)\b/.test(lower)) {
+    return 'follow-up';
+  }
+  return 'general-education';
 }
 
-export function buildGroundedFallback(question, intel, rawProfile, indoorEval, diagnosticCode = null) {
+/**
+ * Builds the full nested ORACLE environmental context object preserving nulls and provenance.
+ */
+export function buildCoachContextPayload(intel, rawProfile, indoorEval) {
+  const profile = normalizeProfile(rawProfile);
+  const firstHr = intel?.dispersion?.hourly?.[0] || null;
+  const disp = intel?.dispersion || null;
+  const dispOk = Boolean(disp && disp.available !== false);
+  const dayWin = dispOk ? (disp.bestDaytimeWindow || disp.bestOutdoorWindow || null) : null;
+  const lowWin = dispOk ? (disp.lowestPollutionWindow || null) : null;
+  const peakWin = dispOk ? (disp.peakAccumulationWindow || null) : null;
+
+  return {
+    location: {
+      city: intel?.location?.name ?? null,
+      region: intel?.location?.region ?? null,
+      lat: intel?.location?.lat ?? null,
+      lon: intel?.location?.lon ?? null,
+      timezone: intel?.location?.timezone ?? null
+    },
+    provenance: {
+      provider: intel?.metadata?.provider ?? null,
+      sourceType: intel?.metadata?.sourceType ?? 'Modeled Atmospheric Grid (Not Ground Station)',
+      retrievalTimestamp: intel?.metadata?.fetchedAt ?? null,
+      measurementTimestamp: intel?.current?.timestamp ?? null,
+      spatialResolution: intel?.metadata?.gridResolution ?? null,
+      averagingPeriod: intel?.metadata?.averagingNote ?? null,
+      freshness: intel?.metadata?.freshness ?? null
+    },
+    airQuality: {
+      aqi: intel?.cpcb?.aqi ?? null,
+      standard: intel?.cpcb?.methodologyLabel ?? 'CPCB-Derived Modeled Estimate',
+      category: intel?.cpcb?.band?.label ?? null,
+      primaryPollutant: intel?.cpcb?.primaryPollutant?.name ?? null,
+      completenessMet: intel?.cpcb?.meetsCompletenessRule ?? null,
+      pm25_24h: intel?.rollingAverages?.pm25_24h ?? intel?.current?.pm25 ?? null,
+      yesterdayPm25_24h: intel?.rollingAverages?.yesterdayPm25_24h ?? null,
+      pm10_24h: intel?.rollingAverages?.pm10_24h ?? intel?.current?.pm10 ?? null,
+      no2_24h: intel?.rollingAverages?.no2_24h ?? intel?.current?.no2 ?? null,
+      so2_24h: intel?.rollingAverages?.so2_24h ?? intel?.current?.so2 ?? null,
+      o3_8h: intel?.rollingAverages?.o3_8h ?? intel?.current?.o3 ?? null,
+      coMg_8h: intel?.rollingAverages?.coMg_8h ?? intel?.current?.coMg ?? null,
+      nh3_24h: null,
+      pb_24h: null
+    },
+    atmospheric: {
+      tempC: intel?.current?.tempC ?? null,
+      windKmh: intel?.current?.windKmh ?? firstHr?.windKmh ?? null,
+      windCompass: firstHr?.windCompass ?? null,
+      rhPct: intel?.current?.rhPct ?? null,
+      blhMeters: firstHr?.blh ?? null,
+      ventilationCoeff: firstHr?.vc ?? null,
+      dispersionCategory: firstHr?.dispersionCategory ?? disp?.classification ?? null,
+      trend: disp?.trend ?? null,
+      trendDeltaPct: disp?.trendDeltaPct ?? null,
+      lowestWindow: lowWin ? `${lowWin.label} (${lowWin.avgPm25} µg/m³)` : null,
+      bestDaytimeWindow: dayWin ? dayWin.label : null,
+      bestDaytimePm25: dayWin?.avgPm25 ?? null,
+      peakAccumulationWindow: peakWin ? `${peakWin.label} (${peakWin.avgPm25} µg/m³)` : null,
+      confidenceNote: disp?.confidence?.reason ?? null
+    },
+    household: {
+      vulnerability: profile.householdProfile,
+      commuteMode: profile.commuteMode,
+      dailyCommuteKm: profile.dailyCommuteKm,
+      cookingFuel: profile.cookingFuel,
+      roomSqFt: profile.roomSqFt,
+      ceilingHeightFt: profile.ceilingHeightFt,
+      leakageId: profile.leakageId,
+      budgetTier: profile.budgetTier
+    },
+    indoorPhysics: indoorEval
+      ? {
+          roomVolumeM3: indoorEval.dimensions.volumeM3,
+          recommendedCadrM3h: indoorEval.sizing.recommendedCadrM3h,
+          effectiveCadrM3h: indoorEval.sizing.effectiveCadrM3h,
+          targetAch: indoorEval.sizing.recommendedAch,
+          filterGrade: indoorEval.assumptions.filterGradeLabel,
+          unfilteredIndoorPm25: indoorEval.outcomes.unfilteredIndoorPm25,
+          filteredIndoorPm25: indoorEval.outcomes.filteredIndoorPm25,
+          assumptions: indoorEval.safetyNotes?.[0] || null
+        }
+      : null
+  };
+}
+
+/**
+ * Session-level Conversation Manager (in-memory only; never persists private chat to localStorage).
+ */
+export function createConversationSession() {
+  let locationKey = '';
+  let turns = [];
+  let olderSummary = '';
+
+  function setLocation(loc) {
+    const nextKey = loc ? `${loc.name || ''}:${loc.lat ?? ''},${loc.lon ?? ''}` : '';
+    if (locationKey && nextKey && nextKey !== locationKey) {
+      turns = [];
+      olderSummary = '';
+      locationKey = nextKey;
+      return true; // Reset occurred
+    }
+    locationKey = nextKey;
+    return false;
+  }
+
+  function reset() {
+    turns = [];
+    olderSummary = '';
+  }
+
+  function addExchange(question, answerText, intent) {
+    turns.push({
+      question: sanitizeText(question, 360),
+      answer: sanitizeText(answerText, 600),
+      intent
+    });
+    if (turns.length > MAX_STORED_TURNS) {
+      const evicted = turns.shift();
+      const snippet = `Earlier discussed ${evicted.intent}: "${evicted.question.slice(0, 70)}".`;
+      olderSummary = `${olderSummary} ${snippet}`.trim().slice(-380);
+    }
+  }
+
+  function exportHistoryPayload() {
+    const recent = turns.slice(-Math.floor(MAX_SENT_HISTORY_MESSAGES / 2));
+    const history = [];
+    for (const t of recent) {
+      history.push({ role: 'user', text: t.question });
+      history.push({ role: 'model', text: t.answer });
+    }
+    return { history, historySummary: olderSummary };
+  }
+
+  return {
+    setLocation,
+    reset,
+    addExchange,
+    exportHistoryPayload,
+    getTurnCount: () => turns.length
+  };
+}
+
+/**
+ * Deterministic Grounded Fallback Engine (clearly marked Offline Mode; never claims Gemini ran).
+ */
+export function buildGroundedFallback(question, intel, rawProfile, indoorEval, options = {}) {
+  const diagnosticCode = typeof options === 'string' ? options : (options.diagnosticCode || null);
+  const history = Array.isArray(options?.history) ? options.history : [];
   const profile = normalizeProfile(rawProfile);
   const city = intel?.location?.name || 'Selected Location';
   const aqi = intel?.cpcb?.aqi ?? null;
   const band = intel?.cpcb?.band?.label || 'Unavailable';
-  const primary = intel?.cpcb?.primaryPollutant;
-  const todayPm25 = intel?.rollingAverages?.pm25_24h ?? null;
+  const primary = intel?.cpcb?.primaryPollutant || null;
+  const todayPm25 = intel?.rollingAverages?.pm25_24h ?? intel?.current?.pm25 ?? null;
   const yestPm25 = intel?.rollingAverages?.yesterdayPm25_24h ?? null;
   const disp = intel?.dispersion;
-  const firstHr = disp?.hourly?.[0];
-  const dispAvailable = Boolean(disp && disp.available !== false);
-  const dayWin = dispAvailable ? (disp.bestDaytimeWindow || disp.bestOutdoorWindow || null) : null;
-  const lowWin = dispAvailable ? (disp.lowestPollutionWindow || null) : null;
-  const peakWin = dispAvailable ? (disp.peakAccumulationWindow || null) : null;
-  const cleanQ = sanitizeText(question, 240);
-  const intent = detectQuestionIntent(cleanQ);
+  const dispOk = Boolean(disp && disp.available !== false);
+  const firstHr = disp?.hourly?.[0] || null;
+  const dayWin = dispOk ? (disp.bestDaytimeWindow || disp.bestOutdoorWindow || null) : null;
+  const lowWin = dispOk ? (disp.lowestPollutionWindow || null) : null;
+  const peakWin = dispOk ? (disp.peakAccumulationWindow || null) : null;
+  const ts = intel?.current?.timestamp || null;
+  const resLabel = intel?.metadata?.gridResolution || '~40 km CAMS grid';
 
-  const engineLabel = diagnosticCode
-    ? `VayuShield Grounded Engine (${diagnosticCode})`
-    : 'VayuShield Grounded Engine (Offline Fallback)';
+  const cleanQ = sanitizeText(question, 360);
+  const intent = classifyCoachIntent(cleanQ, history.length);
 
-  const commonLimit = `Modeled ${intel?.metadata?.gridResolution || '~40 km'} grid data (not a ground CPCB station; NH₃ & Pb unavailable). Informational only, not medical advice.`;
+  const mkFact = (label, value, unit = '', sourceType = 'modeled') => ({
+    label,
+    value: value === null || value === undefined ? null : value,
+    unit,
+    sourceType: value === null || value === undefined ? 'unavailable' : sourceType,
+    timestamp: ts
+  });
+
+  const mkRec = (title, description, reason, priority = 'medium', timeWindow = 'Today') => ({
+    title,
+    description,
+    reason,
+    priority,
+    timeWindow
+  });
+
+  const commonLimits = [
+    `Offline grounded response (${diagnosticCode || 'API_UNAVAILABLE'}): generated deterministically without Gemini.`,
+    `Modeled ${resLabel} telemetry (not a direct CPCB ground station; NH₃ & Pb unavailable). Informational only, not medical advice.`
+  ];
+
+  const baseMeta = {
+    provider: 'vayushield-deterministic',
+    model: null,
+    engine: 'VayuShield Grounded Engine · Offline Mode',
+    mode: 'grounded-fallback',
+    isFallback: true,
+    status: 'fallback',
+    diagnosticCode: diagnosticCode || 'OFFLINE_FALLBACK',
+    intent
+  };
 
   if (intent === 'greeting') {
+    const answer = aqi !== null
+      ? `Hello! Currently ${city} shows a modeled CPCB-derived AQI of ${aqi} (${band}), led by ${primary?.name || 'PM2.5'}. Ask me about outdoor windows, yesterday’s trend, indoor air improvements, or CADR sizing for your ${profile.roomSqFt} sq.ft room.`
+      : `Hello! I’m ready to analyze air quality, dispersion windows, and indoor filtration for ${city}. Pick any prompt above or type a specific question.`;
     return {
-      engine: engineLabel,
-      isFallback: true,
-      headline: `VayuShield Assistant · ${city}`,
-      directAnswer: aqi !== null
-        ? `Hello! Right now ${city} has a modeled CPCB-derived AQI of ${aqi} (${band}), driven primarily by ${primary?.name || 'PM2.5'}. Ask me about today’s vs. yesterday’s trend, the safest daytime window for outdoor activity, or CADR sizing for your ${profile.roomSqFt} sq.ft room.`
-        : `Hello! I’m ready to analyze air quality, atmospheric dispersion, and room filtration for ${city}. Select any suggested question above or ask about outdoor windows, commute protection, or purifier sizing.`,
+      ...baseMeta,
+      headline: `VayuShield Coach · ${city}`,
+      answer,
+      directAnswer: answer,
+      factsUsed: [mkFact('Est. AQI', aqi, band, 'modeled')],
       recommendations: [
-        'Tap "Compare today vs. yesterday" to check 24-hour PM2.5 direction.',
-        'Tap "When is outdoor activity most practical?" for sunrise-to-sunset scheduling.',
-        'Tap "What filtration capacity does my room need?" for CADR math.'
-      ],
-      factsUsed: [
-        aqi !== null ? `${city} Est. AQI ${aqi} (${band}) · Valid ${intel?.current?.timestamp || 'now'}` : `${city} telemetry active`
+        mkRec('Check Outdoor Timing', 'Ask when the cleanest practical daytime window occurs.', 'Avoids peak stagnation periods.', 'low', 'Daytime')
       ],
       indoorGuidance: '',
-      assumptionsAndLimits: [commonLimit]
+      assumptionsAndLimits: commonLimits,
+      followUpSuggestions: ['Explain my current air quality', 'Compare today vs. yesterday', 'Explain my room’s CADR']
     };
   }
 
-  if (intent === 'compare-yesterday') {
-    const diff = todayPm25 !== null && yestPm25 !== null ? Number((todayPm25 - yestPm25).toFixed(1)) : null;
-    const directAnswer = diff !== null
-      ? `In ${city}, the current 24-hour rolling PM2.5 mean is ${todayPm25} µg/m³ compared with ${yestPm25} µg/m³ over the prior 24-hour period—a change of ${diff >= 0 ? '+' : ''}${diff} µg/m³ (${diff < 0 ? 'cleaner than yesterday' : diff > 0 ? 'higher than yesterday' : 'unchanged'}). Over the next 6 hours, dispersion modeling projects a ${disp?.trend || 'steady'} trend (${disp?.trendDeltaPct >= 0 ? '+' : ''}${disp?.trendDeltaPct ?? 0}%).`
-      : `Current 24-hour rolling PM2.5 in ${city} is ${todayPm25 !== null ? `${todayPm25} µg/m³` : 'unavailable'}, while a full prior-24h baseline was unavailable in this fetch. Over the next 6 hours, modeled PM2.5 is ${disp?.trend || 'steady'} (${disp?.trendDeltaPct >= 0 ? '+' : ''}${disp?.trendDeltaPct ?? 0}%).`;
-
+  if (intent === 'filtration-cadr') {
+    const answer = indoorEval
+      ? `Your ${indoorEval.dimensions.floorAreaSqFt} sq.ft room (${indoorEval.dimensions.ceilingHeightFt} ft ceiling = ${indoorEval.dimensions.volumeM3} m³ volume) needs ≥ ${indoorEval.sizing.recommendedCadrM3h} m³/h CADR for ${indoorEval.sizing.recommendedAch} ACH. At ${indoorEval.sizing.effectiveCadrM3h} m³/h effective CADR (${indoorEval.assumptions.filterGradeLabel}), modeled steady-state indoor PM2.5 drops from ${indoorEval.outcomes.unfilteredIndoorPm25} to ${indoorEval.outcomes.filteredIndoorPm25} µg/m³ (-${indoorEval.outcomes.reductionPct}%).`
+      : 'Room CADR sizing requires valid room area and ceiling height values.';
     return {
-      engine: engineLabel,
-      isFallback: true,
-      headline: `${city}: Today vs. Yesterday PM2.5 Trend`,
-      directAnswer,
+      ...baseMeta,
+      headline: `Room Filtration Sizing: ${indoorEval?.sizing?.recommendedCadrM3h ?? 'N/A'} m³/h CADR`,
+      answer,
+      directAnswer: answer,
+      factsUsed: indoorEval
+        ? [
+            mkFact('Room Volume', indoorEval.dimensions.volumeM3, 'm³', 'calculated'),
+            mkFact('Target CADR', indoorEval.sizing.recommendedCadrM3h, 'm³/h', 'calculated'),
+            mkFact('Filtered PM2.5', indoorEval.outcomes.filteredIndoorPm25, 'µg/m³', 'calculated')
+          ]
+        : [],
       recommendations: [
-        dayWin
-          ? `Plan unavoidable daytime errands during ${dayWin.label} (Projected PM2.5: ${dayWin.avgPm25} µg/m³).`
-          : 'Monitor hourly updates before scheduling outdoor exertion.',
-        peakWin
-          ? `Keep windows sealed during the peak accumulation window (${peakWin.label}, projected ${peakWin.avgPm25} µg/m³).`
-          : 'Close exterior openings during evening wind drops.'
+        mkRec('Zero-Cost Sealing', `Weather-strip door gaps to lower infiltration from ${indoorEval?.assumptions?.infiltrationAch ?? 0.6} ACH toward 0.3 ACH.`, 'Reduces outdoor PM2.5 ingress before filtration.', 'medium', 'Continuous'),
+        mkRec('Budget DIY HEPA/MERV-13 Box', 'Build a sealed exhaust-fan + MERV-13/HEPA box (~₹2,400, ~250–300 m³/h CADR).', 'Delivers high particle CADR at low cost.', 'high', 'Sleep & High-AQI Hours'),
+        mkRec('Certified True H13 HEPA', `Choose a purifier rated ≥ ${indoorEval?.sizing?.recommendedCadrM3h ?? 250} m³/h at medium/sleep speed with ionizer OFF.`, 'Avoids ozone irritation while sustaining target ACH.', 'high', 'Evening & Night')
       ],
-      factsUsed: [
-        `Today 24h PM2.5: ${todayPm25 ?? 'N/A'} µg/m³ · Yesterday 24h PM2.5: ${yestPm25 ?? 'N/A'} µg/m³`,
-        `Next 6h modeled trend: ${disp?.trend || 'unavailable'} (${disp?.trendDeltaPct ?? 0}%)`
-      ],
-      indoorGuidance: directAnswer,
-      assumptionsAndLimits: [commonLimit]
+      indoorGuidance: 'True HEPA removes particles (PM2.5/PM10) only—not gaseous NO₂, CO, or VOCs. Use outward kitchen exhaust for combustion gases.',
+      assumptionsAndLimits: [commonLimits[0], 'Single-zone steady-state mass balance (±15% door-opening uncertainty).'],
+      followUpSuggestions: ['How can I improve my indoor air?', 'What if I seal window gaps better?', 'Compare today vs. yesterday']
     };
   }
 
-  if (intent === 'daytime-window') {
-    const overnightExplain = lowWin && !lowWin.isDaytime
-      ? ` While the absolute lowest concentration occurs overnight (${lowWin.label} at ${lowWin.avgPm25} µg/m³), VayuShield excludes overnight hours from exercise recommendations due to darkness, safety, and sleep recovery.`
-      : '';
+  if (intent === 'indoor-air') {
+    const answer = `For ${city} (modeled PM2.5 ${todayPm25 ?? 'Unavailable'} µg/m³) with your ${profile.cookingFuel} kitchen and ${indoorEval?.assumptions?.leakageLabel?.toLowerCase() || 'typical'} room envelope, focus on three levers: venting cooking gases outward, closing windows during peak stagnation, and running mechanical HEPA filtration sized to ≥ ${indoorEval?.sizing?.recommendedCadrM3h ?? 250} m³/h.`;
+    return {
+      ...baseMeta,
+      headline: `${city}: Indoor Air Quality Protection Plan`,
+      answer,
+      directAnswer: answer,
+      factsUsed: [
+        mkFact('Outdoor PM2.5', todayPm25, 'µg/m³', 'modeled'),
+        mkFact('Unfiltered Indoor', indoorEval?.outcomes?.unfilteredIndoorPm25 ?? null, 'µg/m³', 'calculated'),
+        mkFact('Filtered Indoor', indoorEval?.outcomes?.filteredIndoorPm25 ?? null, 'µg/m³', 'calculated')
+      ],
+      recommendations: [
+        mkRec(
+          'Control Kitchen Emissions',
+          profile.cookingFuel === 'induction'
+            ? 'Cover pans and run kitchen exhaust during high-heat frying.'
+            : 'Run an outward exhaust fan during LPG/solid-fuel cooking and shift boiling to an electric kettle or induction plate.',
+          'Combustion releases NO₂ and PM2.5 that True HEPA alone cannot fully remove.',
+          'high',
+          'During Meal Prep'
+        ),
+        mkRec(
+          'Timed Brief Ventilation',
+          disp?.bestVentilationWindow?.guidance || 'Keep windows shut during stagnation and flush briefly during cleaner midday hours.',
+          'Manages indoor CO₂ without importing peak smog.',
+          'medium',
+          dayWin?.label || 'Midday'
+        ),
+        mkRec(
+          'Mechanical True HEPA (No Ozone)',
+          `Run ≥ ${indoorEval?.sizing?.recommendedCadrM3h ?? 250} m³/h HEPA filtration in your main living/sleep room; avoid incense, candles, and ozone ionizers.`,
+          'Cuts steady-state indoor PM2.5 without generating indoor ozone.',
+          'high',
+          'Evening & Sleep'
+        )
+      ],
+      indoorGuidance: indoorEval
+        ? `Modeled steady-state indoor PM2.5 drops from ${indoorEval.outcomes.unfilteredIndoorPm25} to ${indoorEval.outcomes.filteredIndoorPm25} µg/m³ at ${indoorEval.sizing.effectiveCadrM3h} m³/h effective CADR.`
+        : 'Size mechanical HEPA filtration to 4–5 ACH.',
+      assumptionsAndLimits: commonLimits,
+      followUpSuggestions: ['Explain my room’s CADR', 'When is a practical outdoor activity window?', 'What should my household do?']
+    };
+  }
+
+  if (intent === 'outdoor-activity') {
     const daylightSpan = disp?.daylight?.sunriseLabel && disp?.daylight?.sunsetLabel
       ? ` between sunrise (${disp.daylight.sunriseLabel}) and sunset (${disp.daylight.sunsetLabel})`
       : '';
-    const pmDetail = typeof dayWin?.avgPm25 === 'number'
-      ? `, with projected PM2.5 of ${dayWin.avgPm25} µg/m³${dayWin.deltaText ? ` (${dayWin.deltaText})` : ''}`
+    const overnightExplain = lowWin && !lowWin.isDaytime
+      ? ` Although modeled PM2.5 dips lower overnight (${lowWin.label} at ${lowWin.avgPm25} µg/m³), overnight hours are excluded from outdoor exercise guidance for safety and sleep hygiene.`
       : '';
-    const directAnswer = dayWin
-      ? `For ${city}, the best practical daytime window${daylightSpan} is ${dayWin.label}${pmDetail}.${overnightExplain}`
-      : `Daytime forecast windows are currently unavailable for ${city}; check the 24-hour dispersion bar chart once telemetry refreshes.`;
-
+    const pmDetail = typeof dayWin?.avgPm25 === 'number'
+      ? ` with projected PM2.5 of ${dayWin.avgPm25} µg/m³${dayWin.deltaText ? ` (${dayWin.deltaText})` : ''}`
+      : '';
+    const answer = dayWin
+      ? `For ${city}, the cleanest practical daytime window${daylightSpan} is ${dayWin.label}${pmDetail}.${overnightExplain}`
+      : `Daytime forecast windows are currently unavailable for ${city}; inspect the 24-hour dispersion bars after refreshing telemetry.`;
     return {
-      engine: engineLabel,
-      isFallback: true,
-      headline: `${city}: Practical Daytime Activity & Ventilation Window`,
-      directAnswer,
-      recommendations: [
-        disp?.bestVentilationWindow?.guidance || 'Limit open-window flushing to 10–15 minutes during afternoon mixing.',
-        aqi !== null && aqi > 200
-          ? `Because AQI is ${aqi} (${band}), keep vigorous cardio indoors even during ${dayWin?.label || 'midday'}.`
-          : `Use ${dayWin?.label || 'midday hours'} for light-to-moderate outdoor activity away from heavy traffic.`
-      ],
+      ...baseMeta,
+      headline: `${city}: Practical Daytime Outdoor Window`,
+      answer,
+      directAnswer: answer,
       factsUsed: [
-        dayWin
-          ? `Daytime window ${dayWin.label}${typeof dayWin.avgPm25 === 'number' ? `: Projected ${dayWin.avgPm25} µg/m³` : ''}${dayWin.avgVc ? ` · Ventilation Coeff. ${dayWin.avgVc} m²/s` : ''}`
-          : 'Daytime window pending',
-        peakWin ? `Peak accumulation risk: ${peakWin.label} (${peakWin.avgPm25} µg/m³)` : 'Peak window pending'
+        mkFact('Daytime Window', dayWin?.label ?? null, typeof dayWin?.avgPm25 === 'number' ? `${dayWin.avgPm25} µg/m³` : '', 'modeled'),
+        mkFact('Peak Risk Window', peakWin?.label ?? null, typeof peakWin?.avgPm25 === 'number' ? `${peakWin.avgPm25} µg/m³` : '', 'modeled')
       ],
-      indoorGuidance: directAnswer,
-      assumptionsAndLimits: [commonLimit]
+      recommendations: [
+        mkRec(
+          'Schedule Activity in Daylight Window',
+          aqi !== null && aqi > 200
+            ? `Est. AQI is ${aqi} (${band})—move vigorous exercise indoors and use ${dayWin?.label || 'midday'} only for brief errands.`
+            : `Plan light-to-moderate outdoor activity during ${dayWin?.label || 'well-mixed daylight hours'} away from heavy traffic.`,
+          'Aligns activity with deeper afternoon boundary-layer mixing.',
+          'high',
+          dayWin?.label || 'Daytime'
+        ),
+        mkRec(
+          'Avoid Peak Accumulation',
+          peakWin ? `Minimize outdoor exposure during ${peakWin.label} (projected ${peakWin.avgPm25} µg/m³).` : 'Avoid calm early-morning and late-evening haze.',
+          'Low wind and shallow mixing trap near-ground emissions.',
+          'medium',
+          peakWin?.label || 'Evening'
+        )
+      ],
+      indoorGuidance: 'Keep exterior doors closed outside your chosen daytime ventilation window.',
+      assumptionsAndLimits: commonLimits,
+      followUpSuggestions: ['How can I improve my indoor air?', 'What is driving pollution?', 'Explain forecast uncertainty']
     };
   }
 
-  if (intent === 'room-cadr') {
-    const directAnswer = indoorEval
-      ? `Your ${indoorEval.dimensions.floorAreaSqFt} sq.ft room (${indoorEval.dimensions.ceilingHeightFt} ft ceiling = ${indoorEval.dimensions.volumeM3} m³ volume) requires a target CADR of ≥ ${indoorEval.sizing.recommendedCadrM3h} m³/h to achieve ${indoorEval.sizing.recommendedAch} air changes per hour (ACH). At ${indoorEval.sizing.effectiveCadrM3h} m³/h effective CADR (${indoorEval.assumptions.filterGradeLabel}), steady-state indoor PM2.5 drops from ${indoorEval.outcomes.unfilteredIndoorPm25} µg/m³ to ${indoorEval.outcomes.filteredIndoorPm25} µg/m³ (-${indoorEval.outcomes.reductionPct}%).`
-      : 'Room filtration sizing requires room area and ceiling height parameters.';
-
+  if (intent === 'forecast-interpretation') {
+    const diff = todayPm25 !== null && yestPm25 !== null ? Number((todayPm25 - yestPm25).toFixed(1)) : null;
+    const answer = diff !== null
+      ? `In ${city}, the current 24-hour rolling PM2.5 mean is ${todayPm25} µg/m³ versus yesterday’s ${yestPm25} µg/m³ (${diff >= 0 ? '+' : ''}${diff} µg/m³ — ${diff < 0 ? 'cleaner than yesterday' : diff > 0 ? 'higher than yesterday' : 'unchanged'}). Over the next 6 hours, dispersion forecasts indicate a ${disp?.trend || 'unavailable'} trend (${disp?.trendDeltaPct ?? 'N/A'}%).`
+      : `In ${city}, current 24-hour PM2.5 is ${todayPm25 ?? 'Unavailable'} µg/m³; yesterday’s full 24-hour baseline was unavailable in this fetch. Next 6-hour modeled trend: ${disp?.trend || 'unavailable'}. Note that modeled ${resLabel} grids smooth out sharp street-level spikes.`;
     return {
-      engine: engineLabel,
-      isFallback: true,
-      headline: `Room Filtration Sizing: ${indoorEval?.sizing?.recommendedCadrM3h || 250} m³/h Target CADR`,
-      directAnswer,
-      recommendations: [
-        `Zero-cost step: Weather-strip door gaps to cut infiltration from ${indoorEval?.assumptions?.infiltrationAch ?? 0.6} ACH toward 0.3 ACH.`,
-        `Budget DIY option (~₹2,400/unit): A sealed exhaust-fan + MERV-13/HEPA box delivers ~250–300 m³/h effective CADR.`,
-        `Commercial option: Choose a certified True H13 HEPA unit rated ≥ ${indoorEval?.sizing?.recommendedCadrM3h || 250} m³/h at medium/sleep speed with ionizer OFF.`
-      ],
+      ...baseMeta,
+      headline: `${city}: Trend, Yesterday Comparison & Uncertainty`,
+      answer,
+      directAnswer: answer,
       factsUsed: [
-        indoorEval ? `Volume ${indoorEval.dimensions.volumeM3} m³ × ${indoorEval.sizing.recommendedAch} ACH = ${indoorEval.sizing.recommendedCadrM3h} m³/h CADR` : 'Room volume active',
-        indoorEval ? `Steady-state PM2.5: ${indoorEval.outcomes.unfilteredIndoorPm25} -> ${indoorEval.outcomes.filteredIndoorPm25} µg/m³ (±15%)` : 'Mass-balance model'
+        mkFact('Today 24h PM2.5', todayPm25, 'µg/m³', 'modeled'),
+        mkFact('Yesterday 24h PM2.5', yestPm25, 'µg/m³', 'modeled'),
+        mkFact('6h Forecast Trend', disp?.trend ?? null, typeof disp?.trendDeltaPct === 'number' ? `${disp.trendDeltaPct}%` : '', 'modeled')
       ],
-      indoorGuidance: directAnswer,
-      assumptionsAndLimits: ['True HEPA removes particles (PM2.5/PM10) only—not gaseous NO₂ or VOCs. Assumes well-mixed single zone (±15%).']
+      recommendations: [
+        mkRec('Plan Around Daylight Mixing', dayWin ? `Use ${dayWin.label} (projected ${dayWin.avgPm25} µg/m³) for essential errands.` : 'Check hourly forecast updates before planning outdoor activity.', 'Accounts for projected dispersion changes.', 'medium', dayWin?.label || 'Daytime'),
+        mkRec('Cross-Check Local Stations', 'Verify severe local smoke or roadside haze against an official CPCB CAAQMS monitor.', `CAMS ${resLabel} cells average across wide urban areas.`, 'low', 'Ongoing')
+      ],
+      indoorGuidance: 'Run filtration proactively ahead of worsening evening trends.',
+      assumptionsAndLimits: commonLimits,
+      followUpSuggestions: ['What is driving pollution?', 'Practical outdoor window', 'What should my household do?']
     };
   }
 
-  if (intent === 'improve-indoor' || intent === 'commute') {
-    const directAnswer = intent === 'commute'
-      ? `For your ${profile.dailyCommuteKm} km ${profile.commuteMode} commute in ${city} (Est. AQI ${aqi ?? 'N/A'}), ${aqi !== null && aqi > 150 ? 'wear a tight-seal N95/FFP2 respirator along traffic corridors and avoid idling behind diesel vehicles.' : 'standard precautions apply, though keeping a fitted N95 handy for congested intersections reduces peak roadside exposure.'}`
-      : `With a ${profile.cookingFuel} kitchen setup and ${indoorEval?.assumptions?.leakageLabel?.toLowerCase() || 'typical'} envelope in ${city}, indoor air quality depends on sealing outdoor infiltration during peak haze, venting cooking combustion gases, and running ≥ ${indoorEval?.sizing?.recommendedCadrM3h || 250} m³/h mechanical HEPA filtration.`;
-
+  if (intent === 'atmospheric-dispersion' || intent === 'pollution-causes') {
+    const blh = typeof firstHr?.blh === 'number' ? firstHr.blh : null;
+    const wind = intel?.current?.windKmh ?? firstHr?.windKmh ?? null;
+    const vc = typeof firstHr?.vc === 'number' ? firstHr.vc : null;
+    const answer = `Air quality in ${city} (Est. AQI ${aqi ?? 'Unavailable'}, ${band}) is primarily driven by ${primary ? `${primary.name} (${primary.concentration} ${primary.unit}, ${primary.averaging} mean)` : 'unavailable primary pollutant data'}. Current modeled boundary-layer height is ${blh !== null ? `${blh} m` : 'unavailable'} with 10m wind of ${wind !== null ? `${wind} km/h` : 'unavailable'}, yielding a Ventilation Coefficient of ${vc !== null ? `${vc.toLocaleString('en-IN')} m²/s` : 'unavailable'} (${firstHr?.dispersionCategory || disp?.classification || 'stagnation risk estimate'}).`;
     return {
-      engine: engineLabel,
-      isFallback: true,
-      headline: intent === 'commute' ? `${city}: Commute Exposure Protection` : `${city}: Indoor Air Quality Action Plan`,
-      directAnswer,
-      recommendations: [
-        profile.cookingFuel === 'induction'
-          ? 'Use pan lids and kitchen exhaust during high-heat frying to capture cooking aerosols.'
-          : 'Run an outward kitchen exhaust fan during LPG/solid-fuel cooking and shift boiling/simmering to electric appliances to prevent NO₂ buildup.',
-        `Operate True HEPA filtration at ≥ ${indoorEval?.sizing?.recommendedCadrM3h || 250} m³/h in your primary living/sleeping room (keep ozone/ionizer modes OFF).`,
-        'Avoid indoor incense, candles, and mosquito coils on Moderate-to-Severe AQI days.'
-      ],
+      ...baseMeta,
+      headline: `${city}: Pollution Drivers & Dispersion`,
+      answer,
+      directAnswer: answer,
       factsUsed: [
-        `Kitchen: ${profile.cookingFuel} · Commute: ${profile.dailyCommuteKm} km (${profile.commuteMode})`,
-        indoorEval ? `Filtered indoor PM2.5 estimate: ${indoorEval.outcomes.filteredIndoorPm25} µg/m³ vs ${indoorEval.outcomes.unfilteredIndoorPm25} µg/m³ unfiltered` : 'Indoor mass balance'
+        mkFact('Primary Driver', primary?.concentration ?? null, primary ? `${primary.name} ${primary.unit}` : '', 'modeled'),
+        mkFact('Boundary Layer', blh, 'm', 'modeled'),
+        mkFact('Ventilation Coeff.', vc, 'm²/s', 'calculated')
       ],
-      indoorGuidance: directAnswer,
-      assumptionsAndLimits: [commonLimit]
+      recommendations: [
+        mkRec('Close Up During Stagnation', 'Keep windows closed when Ventilation Coefficient drops below 2,000 m²/s.', 'Shallow mixing traps traffic and combustion plumes near ground level.', 'high', peakWin?.label || 'Evening'),
+        mkRec('Flush During Thermal Mixing', dayWin ? `Brief cross-ventilation works best around ${dayWin.label}.` : 'Ventilate briefly during breezy afternoon hours.', 'Deeper mixing dilutes surface pollutants.', 'medium', dayWin?.label || 'Afternoon')
+      ],
+      indoorGuidance: 'Stagnation risk is derived from modeled BLH × wind speed—not confirmed radiosonde temperature inversion data.',
+      assumptionsAndLimits: commonLimits,
+      followUpSuggestions: ['Practical outdoor window', 'Compare today vs. yesterday', 'Improve indoor air']
     };
   }
 
-  if (intent === 'pollution-drivers') {
-    const blhText = typeof firstHr?.blh === 'number' ? `${firstHr.blh} m` : 'unavailable';
-    const windText = typeof firstHr?.windKmh === 'number' ? `${firstHr.windKmh} km/h ${firstHr.windCompass || ''}`.trim() : 'unavailable';
-    const vcText = typeof firstHr?.vc === 'number' ? `${firstHr.vc.toLocaleString('en-IN')} m²/s` : 'unavailable';
-
-    const directAnswer = `Today’s AQI in ${city} (${aqi ?? 'N/A'}, ${band}) is driven primarily by ${primary ? `${primary.name} (${primary.concentration} ${primary.unit}, ${primary.averaging} mean)` : 'fine particulates'}. Surface meteorology shows a modeled boundary-layer height of ${blhText} and 10m wind of ${windText}, yielding a Ventilation Coefficient of ${vcText} (${firstHr?.dispersionCategory || disp?.classification || 'limited dispersion'}).`;
-
+  if (intent === 'commute-protection' || intent === 'household-advice') {
+    const answer = `For your ${profile.householdProfile} household in ${city} (Est. AQI ${aqi ?? 'Unavailable'}, ${band}) and ${profile.dailyCommuteKm} km ${profile.commuteMode} commute: ${aqi !== null && aqi > 150 ? 'wear a tight-seal N95/FFP2 respirator along traffic corridors, keep indoor spaces sealed during evening wind drops, and run mechanical HEPA filtration.' : 'pace prolonged roadside exertion, ventilate cooking fumes outward, and monitor evening dispersion changes.'}`;
     return {
-      engine: engineLabel,
-      isFallback: true,
-      headline: `${city}: Pollution Drivers & Boundary-Layer Dispersion`,
-      directAnswer,
-      recommendations: [
-        'Low Ventilation Coefficients (< 2,000 m²/s) trap traffic and combustion emissions near ground level—keep windows closed during stagnant hours.',
-        dayWin
-          ? `Wait for afternoon boundary-layer growth (${dayWin.label}, projected ${dayWin.avgPm25} µg/m³) for brief ventilation.`
-          : 'Flush indoor air briefly only during afternoon thermal mixing.'
-      ],
+      ...baseMeta,
+      headline: `${city}: Household & Commute Guidance`,
+      answer,
+      directAnswer: answer,
       factsUsed: [
-        `Primary driver: ${primary ? `${primary.name} ${primary.concentration} ${primary.unit} (SI ${primary.subIndex})` : 'N/A'}`,
-        `BLH ${blhText} · Wind ${windText} · VC ${vcText}`
+        mkFact('Est. AQI', aqi, band, 'modeled'),
+        mkFact('Commute', profile.dailyCommuteKm, `km (${profile.commuteMode})`, 'estimated')
       ],
-      indoorGuidance: directAnswer,
-      assumptionsAndLimits: ['Stagnation risk is inferred from modeled BLH × wind speed, not confirmed radiosonde vertical temperature profiles.']
+      recommendations: [
+        mkRec('Commute Protection', profile.commuteMode === 'car' ? 'Use cabin Recirculate in congested traffic and flush briefly every 20–30 min.' : 'Keep a well-fitted N95/FFP2 respirator ready on traffic corridors and avoid idling behind diesel exhaust.', 'Roadside PM2.5 and NO₂ spike well above regional grid averages.', 'high', 'Commute Hours'),
+        mkRec('Evening Indoor Recovery', `Close windows before sunset and target ≥ ${indoorEval?.sizing?.recommendedCadrM3h ?? 250} m³/h HEPA CADR in bedrooms.`, 'Counters nocturnal boundary-layer compression.', 'medium', 'Evening & Night')
+      ],
+      indoorGuidance: 'Maintain one well-sealed, filtered room for children, older adults, or respiratory-sensitive family members.',
+      assumptionsAndLimits: commonLimits,
+      followUpSuggestions: ['Explain my room’s CADR', 'Improve indoor air', 'Practical outdoor window']
     };
   }
 
-  // Default: explain-aqi
-  const directAnswer = aqi !== null
-    ? `${city} currently has a CPCB-derived modeled AQI of ${aqi} (${band}), driven by ${primary ? `${primary.name} at ${primary.concentration} ${primary.unit} (${primary.averaging} rolling average, sub-index ${primary.subIndex})` : 'particulate matter'}. Because this comes from the Copernicus CAMS atmospheric grid (${intel?.metadata?.gridResolution || '~40 km'}) rather than a roadside CAAQMS sensor, local traffic corridors may read higher.`
-    : `Telemetry for ${city} is currently incomplete, so a reliable CPCB-derived AQI cannot be computed without fabricating missing data.`;
-
-  return {
-    engine: engineLabel,
-    isFallback: true,
-    headline: aqi !== null ? `${city}: Est. AQI ${aqi} (${band}) Explained` : `${city}: Telemetry Incomplete`,
-    directAnswer,
-    recommendations: [
-      aqi !== null && aqi > 200
-        ? 'Minimize prolonged outdoor exertion, wear a fitted N95 mask in traffic, and run True HEPA filtration indoors.'
-        : 'Pace prolonged outdoor exertion near heavy traffic and monitor evening dispersion changes.',
-      dayWin
-        ? `Best practical daytime window is ${dayWin.label} (Projected PM2.5: ${dayWin.avgPm25} µg/m³).`
-        : 'Check hourly forecast bars for cleaner afternoon mixing.'
-    ],
+  // Default: aqi-explanation / pollutant-analysis / general-education / follow-up
+  const subIdxText = primary && primary.subIndex != null ? `, sub-index ${primary.subIndex}` : '';
+  const avgText = primary?.averaging ? `${primary.averaging} rolling mean` : 'rolling mean';
+  const winText = dayWin
+    ? ` Best practical daytime window: ${dayWin.label}${typeof dayWin.avgPm25 === 'number' ? ` (projected ${dayWin.avgPm25} µg/m³)` : ''}.`
+    : '';
+  const answer = aqi !== null
+    ? `${city} currently has a modeled CPCB-derived AQI estimate of ${aqi} (${band}), driven by ${primary ? `${primary.name} at ${primary.concentration} ${primary.unit} (${avgText}${subIdxText})` : 'available particulate readings'}.${winText} This figure is computed from ${resLabel} modeled data—not an official ground CPCB CAAQMS monitor—so nearby roadside areas may read higher.`
+    : `Pollutant data for ${city} is currently incomplete, so a valid CPCB-derived AQI cannot be reported without fabricating missing values.`;
+    return {
+    ...baseMeta,
+    headline: aqi !== null ? `${city}: Est. AQI ${aqi} (${band}) Explained` : `${city}: Incomplete Telemetry`,
+    answer,
+    directAnswer: answer,
     factsUsed: [
-      `Valid ${intel?.current?.timestamp || 'now'} · ${intel?.metadata?.sourceType || 'Modeled Grid'} (${intel?.metadata?.gridResolution || '~40 km'})`,
-      primary ? `Primary sub-index: ${primary.name} = ${primary.subIndex} (${primary.concentration} ${primary.unit})` : 'Sub-index incomplete'
+      mkFact('Est. AQI', aqi, band, 'modeled'),
+      mkFact(primary?.name || 'PM2.5', primary?.concentration ?? todayPm25, primary?.unit || 'µg/m³', 'modeled')
     ],
-    indoorGuidance: directAnswer,
-    assumptionsAndLimits: [commonLimit]
+    recommendations: [
+      mkRec('Adjust Outdoor Effort', aqi !== null && aqi > 200 ? 'Shift workouts indoors and wear a fitted N95 for essential trips.' : 'Pace sustained exertion near busy roads.', 'Matches CPCB band guidance without overstating certainty.', 'high', 'Today'),
+      mkRec('Use Practical Daytime Window', dayWin ? `Cleanest practical daylight period is ${dayWin.label} (projected ${dayWin.avgPm25} µg/m³).` : 'Check dispersion forecast once refreshed.', 'Optimizes timing around atmospheric mixing.', 'medium', dayWin?.label || 'Daytime')
+    ],
+    indoorGuidance: indoorEval
+      ? `Target ≥ ${indoorEval.sizing.recommendedCadrM3h} m³/h True HEPA CADR for your ${indoorEval.dimensions.floorAreaSqFt} sq.ft room (ionizer OFF).`
+      : 'Run mechanical True HEPA filtration when outdoor haze rises.',
+    assumptionsAndLimits: commonLimits,
+    followUpSuggestions: ['What is driving pollution?', 'Compare today vs. yesterday', 'Improve indoor air']
   };
 }
 
+/**
+ * Calls POST /api/gemini with validated nested environmental context, session history,
+ * detected intent, and AbortSignal support. Falls back transparently when unavailable.
+ */
 export async function askVayuShieldCoach(params, options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const externalSignal = options.signal || null;
   const profile = normalizeProfile(params.profile);
   const intel = params.intel;
   const indoorEval = params.indoorEval;
-  const question = sanitizeText(params.question, 360) || COACH_PROMPT_TEMPLATES[0].prompt;
+  const history = Array.isArray(params.history) ? params.history : [];
+  const historySummary = typeof params.historySummary === 'string' ? params.historySummary : '';
+  const question = sanitizeText(params.question, 500) || COACH_PROMPT_TEMPLATES[0].prompt;
+  const intent = classifyCoachIntent(question, history.length);
 
   if (!intel || !intel.location) {
-    return buildGroundedFallback(question, intel, profile, indoorEval, 'NO_TELEMETRY');
+    return buildGroundedFallback(question, intel, profile, indoorEval, { diagnosticCode: 'NO_TELEMETRY', history });
   }
 
   const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      const err = new Error('Generation stopped by user.');
+      err.name = 'UserAbortError';
+      throw err;
+    }
+    externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
-  const firstHr = intel.dispersion?.hourly?.[0];
 
   try {
+    const context = buildCoachContextPayload(intel, profile, indoorEval);
     const response = await fetchImpl('/api/gemini', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
         question,
-        city: intel.location.name,
-        lat: intel.location.lat,
-        lon: intel.location.lon,
-        measurementTime: intel.current?.timestamp ?? null,
-        sourceType: `${intel.metadata.sourceType} (${intel.metadata.gridResolution})`,
-        aqi: intel.cpcb?.aqi ?? null,
-        aqiBand: intel.cpcb?.band?.label ?? null,
-        primaryPollutant: intel.cpcb?.primaryPollutant?.name ?? null,
-        pm25: intel.rollingAverages?.pm25_24h ?? intel.current?.pm25 ?? null,
-        yesterdayPm25: intel.rollingAverages?.yesterdayPm25_24h ?? null,
-        pm10: intel.rollingAverages?.pm10_24h ?? intel.current?.pm10 ?? null,
-        no2: intel.rollingAverages?.no2_24h ?? intel.current?.no2 ?? null,
-        so2: intel.rollingAverages?.so2_24h ?? intel.current?.so2 ?? null,
-        o3: intel.rollingAverages?.o3_8h ?? intel.current?.o3 ?? null,
-        coMg: intel.rollingAverages?.coMg_8h ?? intel.current?.coMg ?? null,
-        blh: firstHr?.blh ?? null,
-        windKmh: intel.current?.windKmh ?? firstHr?.windKmh ?? null,
-        vc: firstHr?.vc ?? null,
-        trend: intel.dispersion?.trend ?? 'unavailable',
-        bestWindow: intel.dispersion?.bestDaytimeWindow?.label ?? 'Unavailable',
-        bestWindowPm25: intel.dispersion?.bestDaytimeWindow?.avgPm25 ?? null,
-        peakWindow: intel.dispersion?.peakAccumulationWindow?.label ?? 'Unavailable',
-        householdProfile: profile.householdProfile,
-        commuteMode: profile.commuteMode,
-        dailyCommuteKm: profile.dailyCommuteKm,
-        roomSqFt: profile.roomSqFt,
-        roomVolumeM3: indoorEval?.dimensions?.volumeM3 ?? null,
-        recommendedCadr: indoorEval?.sizing?.recommendedCadrM3h ?? null,
-        unfilteredIndoorPm25: indoorEval?.outcomes?.unfilteredIndoorPm25 ?? null,
-        filteredIndoorPm25: indoorEval?.outcomes?.filteredIndoorPm25 ?? null,
-        cookingFuel: profile.cookingFuel
+        intent,
+        context,
+        history,
+        historySummary
       })
     });
 
     const payload = await response.json().catch(() => null);
     if (!response.ok || !payload || !payload.headline || !Array.isArray(payload.recommendations)) {
       const code = payload?.diagnosticCode || `HTTP_${response.status}`;
-      return buildGroundedFallback(question, intel, profile, indoorEval, code);
+      return buildGroundedFallback(question, intel, profile, indoorEval, {
+        diagnosticCode: code,
+        history
+      });
     }
 
-    return { ...payload, isFallback: false };
+    return {
+      ...payload,
+      answer: payload.answer || payload.directAnswer || payload.indoorGuidance || '',
+      directAnswer: payload.directAnswer || payload.answer || payload.indoorGuidance || '',
+      isFallback: false,
+      intent
+    };
   } catch (err) {
+    if (externalSignal?.aborted) {
+      const abortErr = new Error('Generation stopped by user.');
+      abortErr.name = 'UserAbortError';
+      throw abortErr;
+    }
     const code = err?.name === 'AbortError' ? 'CLIENT_TIMEOUT' : 'NETWORK_UNAVAILABLE';
-    return buildGroundedFallback(question, intel, profile, indoorEval, code);
+    return buildGroundedFallback(question, intel, profile, indoorEval, {
+      diagnosticCode: code,
+      history
+    });
   } finally {
     clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
   }
 }

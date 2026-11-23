@@ -1293,34 +1293,54 @@ progress {
 }
 
 /* ==================== MULTI-TURN LIQUID GLASS AI COACH ==================== */
-.coach-form {
-  display: grid;
-  gap: 10px;
+/* ==================== PROJECT ORACLE: LIQUID GLASS AI COACH ==================== */
+.coach-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border-hairline);
 }
 
-.form-actions {
+.coach-status-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 6px;
 }
 
 .coach-thread {
-  margin-top: 16px;
   display: grid;
   gap: 14px;
+  margin-bottom: 16px;
+  max-height: 620px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.coach-welcome {
+  background: var(--glass-04-bg);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  display: grid;
+  gap: 6px;
 }
 
 .chat-bubble-user {
   justify-self: end;
-  max-width: 82%;
+  max-width: 80%;
   padding: 11px 16px;
   border-radius: 18px 18px 4px 18px;
   background-color: var(--accent-tint);
   border: 1px solid var(--accent-border);
   color: var(--ink-primary);
-  font-size: 0.86rem;
+  font-size: 0.87rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .coach-card {
@@ -1331,6 +1351,75 @@ progress {
   box-shadow: var(--specular-top);
   display: grid;
   gap: 12px;
+}
+
+.coach-answer {
+  margin: 0;
+  font-size: 0.89rem;
+  line-height: 1.6;
+  color: var(--ink-primary);
+}
+
+.coach-facts-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fact-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background-color: rgba(6, 10, 18, 0.72);
+  border: 1px solid var(--border-hairline);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-secondary);
+}
+
+.fact-pill strong {
+  color: var(--ink-primary);
+  font-weight: 600;
+}
+
+.coach-rec-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.coach-rec-item {
+  background-color: rgba(6, 10, 18, 0.52);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.coach-rec-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+
+.coach-rec-title {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--ink-primary);
+}
+
+.coach-followups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 4px;
 }
 
 .coach-card-footer {
@@ -1345,20 +1434,49 @@ progress {
 
 .coach-section-title {
   margin: 0 0 4px;
-  font-size: 0.74rem;
+  font-size: 0.73rem;
   font-weight: 700;
   color: var(--accent-cyan);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
-.coach-list {
-  margin: 0;
-  padding-left: 18px;
-  font-size: 0.84rem;
-  color: var(--ink-secondary);
+.coach-composer {
+  background-color: rgba(6, 10, 18, 0.74);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
   display: grid;
-  gap: 4px;
+  gap: 8px;
+  box-shadow: var(--specular-top);
+}
+
+.coach-textarea {
+  min-height: 52px;
+  max-height: 180px;
+  border: 0;
+  background: transparent;
+  padding: 4px 2px;
+  resize: none;
+  line-height: 1.5;
+}
+
+.coach-textarea:focus-visible {
+  outline: none;
+}
+
+.coach-composer:focus-within {
+  border-color: var(--accent-cyan);
+}
+
+.coach-composer-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-hairline);
 }
 
 /* Community */

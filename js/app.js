@@ -1,11 +1,10 @@
 /**
- * @fileoverview VayuShield Project APEX 2.0 (v3.1) Application Controller.
+ * @fileoverview VayuShield Application Controller (Project APEX 2.0 + Project ORACLE AI Coach).
  * - Zero innerHTML, zero inline styles (strict CSP compliant)
- * - 8-pollutant CPCB bento grid (explicitly marks NH3 & Pb as Not in CAMS) + trend indicators
- * - Interactive SVG Room Mass-Balance Blueprint & CADR/ACH Performance Curve
- * - Explicit reference-scenario notices when live PM2.5 is missing (SCI-06)
- * - Honest separation between Illustrative Examples and Local Device Entries (SCI-07)
- * - On-demand AI Coach invocation (does not burn Gemini API quota on passive page loads)
+ * - 8-pollutant CPCB bento grid (NH3 & Pb explicitly marked Not in CAMS model)
+ * - Interactive SVG Room Blueprint & CADR/ACH Performance Curve
+ * - Multi-turn conversational AI Coach with session memory, AbortController stop,
+ *   structured fact pills, priority recommendations, follow-up chips & dynamic status/model badges
  */
 
 import { compareToWhoGuideline } from './core/cpcbAqi.js';
@@ -21,7 +20,11 @@ import {
 import { evaluateIndoorFiltration } from './core/indoorPhysics.js';
 import { buildImmediateAction, buildIntelligentRoutine } from './core/routineEngine.js';
 import { clearNode, createSafeElement, sanitizeText } from './core/security.js';
-import { askVayuShieldCoach, COACH_PROMPT_TEMPLATES } from './services/aiAssistantService.js';
+import {
+  askVayuShieldCoach,
+  COACH_PROMPT_TEMPLATES,
+  createConversationSession
+} from './services/aiAssistantService.js';
 import {
   buildHistoricalCsv,
   CURATED_CITIES,
@@ -53,6 +56,12 @@ const TREND_ARROWS = Object.freeze({
   falling: '↓ Falling',
   steady: '→ Steady'
 });
+
+const COACH_LOADING_PHASES = Object.freeze([
+  'Analyzing environmental context…',
+  'Interpreting atmospheric conditions…',
+  'Preparing household recommendations…'
+]);
 
 const DEFAULT_DEMO_PLEDGES = [
   {
@@ -146,6 +155,9 @@ const state = {
   fetchToken: 0,
   coachToken: 0,
   coachHistory: [],
+  coachSession: createConversationSession(),
+  coachAbortController: null,
+  coachLoadingTimer: null,
   suggestions: [],
   highlightedSuggestion: -1,
   searchDebounceTimer: null,
@@ -1014,7 +1026,28 @@ function renderImpactSimulator() {
   document.getElementById('imp-disclaimer').textContent = result.methodologyDisclaimer;
 }
 
-/* ==================== MODULE 7: MULTI-TURN LIQUID GLASS AI COACH ==================== */
+/* ==================== MODULE 7: PROJECT ORACLE CONVERSATIONAL AI COACH ==================== */
+
+function updateCoachHeaderStatus({ statusText, statusTone = 'teal', modelText = null }) {
+  const statusEl = document.getElementById('coach-status-badge');
+  const modelEl = document.getElementById('coach-model-badge');
+  const ctxEl = document.getElementById('coach-context-badge');
+
+  if (statusEl && statusText) {
+    statusEl.textContent = statusText;
+    statusEl.className = `badge badge-${statusTone}`;
+  }
+  if (modelEl && modelText) {
+    modelEl.textContent = modelText;
+  }
+  if (ctxEl) {
+    const city = state.intel?.location?.name || state.location.name;
+    const aqi = state.intel?.cpcb?.aqi;
+    ctxEl.textContent = aqi !== null && aqi !== undefined
+      ? `Context: ${city} (Est. AQI ${aqi} · Modeled)`
+      : `Context: ${city} (Telemetry Pending)`;
+  }
+}
 
 function renderCoachTemplates() {
   const row = document.getElementById('coach-templates');
@@ -1026,28 +1059,27 @@ function renderCoachTemplates() {
       attrs: { type: 'button' }
     });
     btn.addEventListener('click', () => {
-      document.getElementById('coach-input').value = tpl.prompt;
       handleCoachSubmit(tpl.prompt);
     });
     row.appendChild(btn);
   }
 }
 
-function formatCoachPlainText(res) {
+function formatCoachAnswerText(res) {
   return [
     res.headline,
-    res.directAnswer || res.indoorGuidance || '',
-    '',
-    ...(res.recommendations || []).length
-      ? ['Recommended Steps:', ...res.recommendations.map((r) => `- ${r}`), '']
-      : [],
-    ...(res.factsUsed || []).length
-      ? ['Data Basis:', ...res.factsUsed.map((f) => `- ${f}`), '']
-      : [],
-    ...(res.assumptionsAndLimits || []).length
-      ? ['Limits:', ...res.assumptionsAndLimits.map((a) => `- ${a}`)]
-      : []
-  ].filter((line, i, arr) => line !== '' || arr[i - 1] !== '').join('\n');
+    res.answer || res.directAnswer || '',
+    res.indoorGuidance ? `\nIndoor Guidance: ${res.indoorGuidance}` : ''
+  ].filter(Boolean).join('\n');
+}
+
+function formatCoachRecsText(res) {
+  const recs = Array.isArray(res.recommendations) ? res.recommendations : [];
+  if (!recs.length) return formatCoachAnswerText(res);
+  return [
+    `${res.headline} — Recommendations (${state.location.name})`,
+    ...recs.map((r, idx) => `${idx + 1}. [${String(r.priority || 'medium').toUpperCase()}] ${r.title} (${r.timeWindow || 'Today'}): ${r.description}${r.reason ? ` — ${r.reason}` : ''}`)
+  ].join('\n');
 }
 
 function renderCoachThread() {
@@ -1055,9 +1087,18 @@ function renderCoachThread() {
   clearNode(out);
 
   if (state.coachHistory.length === 0) {
-    out.appendChild(createSafeElement(document, 'p', {
-      className: 'muted-text',
-      text: `Ready to analyze live ${state.location.name} telemetry. Select a suggested question above or type your own question below.`
+    out.appendChild(createSafeElement(document, 'div', {
+      className: 'coach-welcome',
+      children: [
+        createSafeElement(document, 'strong', {
+          className: 'subhead',
+          text: `Ready to analyze ${state.location.name}`
+        }),
+        createSafeElement(document, 'p', {
+          className: 'muted-text',
+          text: 'Select any suggested prompt above or ask a custom question below. Conversation context stays active across follow-up questions and resets automatically if you switch cities.'
+        })
+      ]
     }));
     return;
   }
@@ -1074,23 +1115,150 @@ function renderCoachThread() {
         children: [
           createSafeElement(document, 'p', {
             className: 'muted-text',
-            text: `Analyzing live ${state.location.name} telemetry and room physics…`
+            attrs: { id: `coach-loading-${turn.id}` },
+            text: turn.loadingText || COACH_LOADING_PHASES[0]
           })
         ]
       }));
       continue;
     }
 
+    if (turn.aborted) {
+      const retryAbortedBtn = createSafeElement(document, 'button', {
+        className: 'btn btn-ghost btn-sm',
+        text: 'Retry',
+        attrs: { type: 'button' }
+      });
+      retryAbortedBtn.addEventListener('click', () => handleCoachSubmit(turn.question));
+      out.appendChild(createSafeElement(document, 'div', {
+        className: 'coach-card',
+        children: [
+          createSafeElement(document, 'p', { className: 'muted-text', text: 'Generation stopped before completion.' }),
+          createSafeElement(document, 'div', { className: 'action-group', children: [retryAbortedBtn] })
+        ]
+      }));
+      continue;
+    }
+
     const res = turn.response;
-    const copyBtn = createSafeElement(document, 'button', {
+    const children = [
+      createSafeElement(document, 'h3', { className: 'panel-title', text: res.headline }),
+      createSafeElement(document, 'p', {
+        className: 'coach-answer',
+        text: res.answer || res.directAnswer || ''
+      })
+    ];
+
+    if (Array.isArray(res.factsUsed) && res.factsUsed.length > 0) {
+      const pills = res.factsUsed.map((f) => {
+        const valText = typeof f === 'string'
+          ? f
+          : `${f.label}: ${f.value === null ? 'Unavailable' : `${f.value}${f.unit ? ` ${f.unit}` : ''}`}`;
+        const srcTag = typeof f === 'object' && f.sourceType ? ` · ${f.sourceType}` : '';
+        return createSafeElement(document, 'span', {
+          className: 'fact-pill',
+          attrs: { title: typeof f === 'object' && f.timestamp ? `Timestamp: ${f.timestamp}` : '' },
+          children: [
+            createSafeElement(document, 'strong', { text: valText }),
+            createSafeElement(document, 'span', { text: srcTag })
+          ]
+        });
+      });
+      children.push(createSafeElement(document, 'div', { className: 'coach-facts-row', children: pills }));
+    }
+
+    if (Array.isArray(res.recommendations) && res.recommendations.length > 0) {
+      const recItems = res.recommendations.map((rec, idx) => {
+        const isObj = rec && typeof rec === 'object';
+        const title = isObj ? rec.title : `Step ${idx + 1}`;
+        const desc = isObj ? rec.description : String(rec);
+        const reason = isObj && rec.reason ? rec.reason : '';
+        const priority = isObj ? rec.priority : 'medium';
+        const timeWin = isObj && rec.timeWindow && rec.timeWindow !== 'Unavailable' ? rec.timeWindow : '';
+        const tone = priority === 'high' ? 'alert' : priority === 'low' ? 'good' : 'warn';
+
+        return createSafeElement(document, 'li', {
+          className: 'coach-rec-item',
+          children: [
+            createSafeElement(document, 'div', {
+              className: 'coach-rec-head',
+              children: [
+                createSafeElement(document, 'span', { className: 'coach-rec-title', text: `${idx + 1}. ${title}` }),
+                createSafeElement(document, 'div', {
+                  className: 'action-group',
+                  children: [
+                    ...(timeWin ? [createSafeElement(document, 'span', { className: 'mono-meta', text: timeWin })] : []),
+                    createSafeElement(document, 'span', { className: `badge badge-${tone}`, text: priority })
+                  ]
+                })
+              ]
+            }),
+            createSafeElement(document, 'p', { className: 'routine-action', text: desc }),
+            ...(reason ? [createSafeElement(document, 'p', { className: 'muted-text', text: reason })] : [])
+          ]
+        });
+      });
+
+      children.push(createSafeElement(document, 'div', {
+        children: [
+          createSafeElement(document, 'h4', { className: 'coach-section-title', text: 'Recommendations' }),
+          createSafeElement(document, 'ol', { className: 'coach-rec-list', children: recItems })
+        ]
+      }));
+    }
+
+    if (res.indoorGuidance) {
+      children.push(createSafeElement(document, 'div', {
+        children: [
+          createSafeElement(document, 'h4', { className: 'coach-section-title', text: 'Indoor Air Guidance' }),
+          createSafeElement(document, 'p', { className: 'muted-text', text: res.indoorGuidance })
+        ]
+      }));
+    }
+
+    if (Array.isArray(res.assumptionsAndLimits) && res.assumptionsAndLimits.length > 0) {
+      children.push(createSafeElement(document, 'p', {
+        className: 'mono-meta',
+        text: res.assumptionsAndLimits.join(' · ')
+      }));
+    }
+
+    if (Array.isArray(res.followUpSuggestions) && res.followUpSuggestions.length > 0) {
+      const followBtns = res.followUpSuggestions.map((qText) => {
+        const chip = createSafeElement(document, 'button', {
+          className: 'chip-btn',
+          text: qText,
+          attrs: { type: 'button' }
+        });
+        chip.addEventListener('click', () => handleCoachSubmit(qText));
+        return chip;
+      });
+      children.push(createSafeElement(document, 'div', { className: 'coach-followups', children: followBtns }));
+    }
+
+    const copyAnswerBtn = createSafeElement(document, 'button', {
       className: 'btn btn-ghost btn-sm',
-      text: 'Copy Response',
+      text: 'Copy Answer',
       attrs: { type: 'button' }
     });
-    copyBtn.addEventListener('click', async () => {
+    copyAnswerBtn.addEventListener('click', async () => {
       try {
-        await navigator.clipboard.writeText(formatCoachPlainText(res));
-        showToast('Copied AI Coach response.');
+        await navigator.clipboard.writeText(formatCoachAnswerText(res));
+        showToast('Copied AI Coach answer.');
+      } catch {
+        showToast('Clipboard access unavailable in this browser.');
+      }
+    });
+
+    const copyRecsBtn = createSafeElement(document, 'button', {
+      className: 'btn btn-ghost btn-sm',
+      text: 'Copy Steps',
+      attrs: { type: 'button' }
+    });
+    copyRecsBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(formatCoachRecsText(res));
+        showToast('Copied recommendations.');
       } catch {
         showToast('Clipboard access unavailable in this browser.');
       }
@@ -1103,44 +1271,20 @@ function renderCoachThread() {
     });
     retryBtn.addEventListener('click', () => handleCoachSubmit(turn.question));
 
-    const children = [
-      createSafeElement(document, 'h3', { className: 'panel-title', text: res.headline }),
-      createSafeElement(document, 'p', {
-        className: 'routine-action',
-        text: res.directAnswer || res.indoorGuidance || ''
-      })
-    ];
-
-    if (Array.isArray(res.recommendations) && res.recommendations.length > 0) {
-      children.push(createSafeElement(document, 'div', {
-        children: [
-          createSafeElement(document, 'h4', { className: 'coach-section-title', text: 'Actionable Guidance' }),
-          createSafeElement(document, 'ul', {
-            className: 'coach-list',
-            children: res.recommendations.map((t) => createSafeElement(document, 'li', { text: t }))
-          })
-        ]
-      }));
-    }
-
-    const metaNotes = [...(res.factsUsed || []), ...(res.assumptionsAndLimits || [])];
-    if (metaNotes.length > 0) {
-      children.push(createSafeElement(document, 'p', {
-        className: 'mono-meta',
-        text: metaNotes.join(' · ')
-      }));
-    }
+    const badgeLabel = res.isFallback
+      ? `${res.engine}${res.diagnosticCode ? ` (${res.diagnosticCode})` : ''}`
+      : `${res.engine}${typeof res.latencyMs === 'number' ? ` · ${res.latencyMs} ms` : ''}`;
 
     children.push(createSafeElement(document, 'div', {
       className: 'coach-card-footer',
       children: [
         createSafeElement(document, 'span', {
           className: `badge ${res.isFallback ? 'badge-warn' : 'badge-teal'}`,
-          text: res.engine
+          text: badgeLabel
         }),
         createSafeElement(document, 'div', {
           className: 'action-group',
-          children: [copyBtn, retryBtn]
+          children: [copyAnswerBtn, copyRecsBtn, retryBtn]
         })
       ]
     }));
@@ -1150,40 +1294,103 @@ function renderCoachThread() {
       children
     }));
   }
+
+  out.scrollTop = out.scrollHeight;
 }
 
-async function handleCoachSubmit(rawQuestion, options = {}) {
-  const question = sanitizeText(rawQuestion, 360) || COACH_PROMPT_TEMPLATES[0].prompt;
+function stopCoachGeneration() {
+  if (state.coachAbortController) {
+    state.coachAbortController.abort();
+    state.coachAbortController = null;
+  }
+  clearInterval(state.coachLoadingTimer);
+}
+
+async function handleCoachSubmit(rawQuestion) {
+  const question = sanitizeText(rawQuestion, 500);
+  if (!question) return;
+  if (state.coachAbortController) return;
+
   const token = ++state.coachToken;
-  const btn = document.getElementById('btn-ask-coach');
-  btn.disabled = true;
-  btn.textContent = 'Evaluating Telemetry…';
+  const sendBtn = document.getElementById('btn-ask-coach');
+  const stopBtn = document.getElementById('btn-stop-coach');
+  const inputEl = document.getElementById('coach-input');
 
-  if (options.resetThread) state.coachHistory = [];
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Sending…';
+  stopBtn.hidden = false;
+  inputEl.disabled = true;
 
-  const turn = { id: token, question, loading: true, response: null };
+  updateCoachHeaderStatus({ statusText: 'Connecting…', statusTone: 'neutral' });
+
+  const turn = { id: token, question, loading: true, loadingText: COACH_LOADING_PHASES[0], response: null, aborted: false };
   state.coachHistory.push(turn);
-  if (state.coachHistory.length > 8) state.coachHistory = state.coachHistory.slice(-8);
+  if (state.coachHistory.length > 10) state.coachHistory = state.coachHistory.slice(-10);
   renderCoachThread();
 
-  const result = await askVayuShieldCoach({
-    question,
-    intel: state.intel,
-    profile: state.profile,
-    indoorEval: state.indoorEval
-  });
+  let phaseIdx = 0;
+  clearInterval(state.coachLoadingTimer);
+  state.coachLoadingTimer = setInterval(() => {
+    phaseIdx = Math.min(COACH_LOADING_PHASES.length - 1, phaseIdx + 1);
+    turn.loadingText = COACH_LOADING_PHASES[phaseIdx];
+    const el = document.getElementById(`coach-loading-${turn.id}`);
+    if (el) el.textContent = turn.loadingText;
+  }, 1600);
 
-  if (token !== state.coachToken) return;
-  turn.loading = false;
-  turn.response = result;
+  const abortController = new AbortController();
+  state.coachAbortController = abortController;
+  const { history, historySummary } = state.coachSession.exportHistoryPayload();
 
-  const badge = document.getElementById('coach-engine-badge');
-  badge.textContent = result.engine;
-  badge.className = `badge ${result.isFallback ? 'badge-warn' : 'badge-teal'}`;
+  try {
+    const result = await askVayuShieldCoach(
+      {
+        question,
+        intel: state.intel,
+        profile: state.profile,
+        indoorEval: state.indoorEval,
+        history,
+        historySummary
+      },
+      { signal: abortController.signal }
+    );
 
-  renderCoachThread();
-  btn.disabled = false;
-  btn.textContent = 'Ask VayuShield AI';
+    if (token !== state.coachToken) return;
+    turn.loading = false;
+    turn.response = result;
+    state.coachSession.addExchange(question, result.answer || result.directAnswer || result.headline, result.intent);
+
+    if (result.isFallback) {
+      const isRateLimited = result.diagnosticCode === 'RATE_LIMITED' || result.diagnosticCode === 'QUOTA_OR_RATE_LIMIT_EXCEEDED';
+      updateCoachHeaderStatus({
+        statusText: isRateLimited ? 'Rate limited' : 'Grounded fallback active',
+        statusTone: isRateLimited ? 'alert' : 'warn',
+        modelText: 'Model: Offline Grounded Engine'
+      });
+    } else {
+      updateCoachHeaderStatus({
+        statusText: 'Connected',
+        statusTone: 'good',
+        modelText: `Model: ${result.model}`
+      });
+    }
+    renderCoachThread();
+  } catch {
+    if (token !== state.coachToken) return;
+    turn.loading = false;
+    turn.aborted = true;
+    updateCoachHeaderStatus({ statusText: 'Stopped', statusTone: 'neutral' });
+    renderCoachThread();
+  } finally {
+    clearInterval(state.coachLoadingTimer);
+    if (state.coachAbortController === abortController) {
+      state.coachAbortController = null;
+    }
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send';
+    stopBtn.hidden = true;
+    inputEl.disabled = false;
+    inputEl.focus();
+  }
 }
 
 /* ==================== MODULE 8: HONEST COMMUNITY BOARD (DEMO VS. LOCAL) ==================== */
@@ -1360,13 +1567,11 @@ async function loadLocationIntelligence(forceRefresh = false) {
     renderDispersionModule();
     renderDependentModules();
 
-    // Reset AI Coach thread cleanly for the new city without burning API quota until the user asks
-    state.coachHistory = [];
-    const coachBadge = document.getElementById('coach-engine-badge');
-    if (coachBadge) {
-      coachBadge.textContent = 'Ready';
-      coachBadge.className = 'badge badge-teal';
+    if (state.coachSession.setLocation(state.location)) {
+      stopCoachGeneration();
+      state.coachHistory = [];
     }
+    updateCoachHeaderStatus({ statusText: 'Ready', statusTone: 'teal' });
     renderCoachThread();
   } catch (err) {
     if (token !== state.fetchToken) return;
@@ -1707,18 +1912,39 @@ function initEvents() {
     }
   });
 
+  const coachInput = document.getElementById('coach-input');
+  const autoSizeCoachInput = () => {
+    coachInput.rows = Math.min(6, Math.max(2, coachInput.value.split('\n').length));
+  };
+  coachInput.addEventListener('input', autoSizeCoachInput);
+  coachInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      document.getElementById('coach-form').requestSubmit();
+    }
+  });
+
   document.getElementById('coach-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    const input = document.getElementById('coach-input');
-    const q = input.value;
-    input.value = '';
+    const q = coachInput.value;
+    if (!sanitizeText(q, 500)) return;
+    coachInput.value = '';
+    autoSizeCoachInput();
     handleCoachSubmit(q);
   });
 
+  document.getElementById('btn-stop-coach').addEventListener('click', () => {
+    stopCoachGeneration();
+    showToast('Stopped AI Coach generation.');
+  });
+
   document.getElementById('btn-clear-chat').addEventListener('click', () => {
+    stopCoachGeneration();
+    state.coachSession.reset();
     state.coachHistory = [];
+    updateCoachHeaderStatus({ statusText: 'Ready', statusTone: 'teal' });
     renderCoachThread();
-    showToast('Cleared AI Coach conversation thread.');
+    showToast('Started a new AI Coach conversation.');
   });
 
   document.getElementById('pledge-form').addEventListener('submit', (e) => {

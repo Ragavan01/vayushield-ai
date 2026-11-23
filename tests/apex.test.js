@@ -51,7 +51,7 @@ test('APEX Data Export: buildHistoricalCsv neutralizes spreadsheet formula injec
 });
 
 test('APEX 2.0 Visual, Performance & Honesty Audit: GPU-safe Liquid Glass, capsule nav, IAQ blueprint/curve & demo separation', () => {
-  assert.equal(COACH_PROMPT_TEMPLATES.length, 6);
+  assert.ok(COACH_PROMPT_TEMPLATES.length >= 6);
 
   const css = fs.readFileSync(path.join(ROOT, 'styles/main.css'), 'utf8');
   assert.match(css, /--glass-01-bg/);

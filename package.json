@@ -1,14 +1,15 @@
 {
   "name": "vayushield-ai",
-  "version": "3.1.0",
-  "description": "VayuShield: Project APEX 2.0 — Liquid Glass environmental intelligence, verified CPCB NAQI engine, atmospheric dispersion forecasting, ANSI/AHAM indoor physics, and null-safe server-proxied Gemini AI.",
+  "version": "3.2.0",
+  "description": "VayuShield: Project ORACLE — Liquid Glass environmental intelligence, verified CPCB NAQI engine, atmospheric dispersion forecasting, ANSI/AHAM indoor physics, and multi-turn server-proxied Gemini AI Coach.",
   "type": "module",
   "engines": {
     "node": ">=18.0.0"
   },
   "scripts": {
-    "check:syntax": "node --check js/core/security.js && node --check js/core/dataIntegrity.js && node --check js/core/cpcbAqi.js && node --check js/core/dispersionEngine.js && node --check js/core/indoorPhysics.js && node --check js/core/impactModel.js && node --check js/core/routineEngine.js && node --check js/core/communityModeration.js && node --check js/services/airQualityService.js && node --check js/services/aiAssistantService.js && node --check js/app.js && node --check api/gemini.js",
-    "test": "node --test tests/core.test.js tests/security.test.js tests/services.test.js tests/accessibility.test.js tests/chimera.test.js tests/apex.test.js tests/acceptance.test.js",
+    "check:syntax": "node --check js/core/security.js && node --check js/core/dataIntegrity.js && node --check js/core/cpcbAqi.js && node --check js/core/dispersionEngine.js && node --check js/core/indoorPhysics.js && node --check js/core/impactModel.js && node --check js/core/routineEngine.js && node --check js/core/communityModeration.js && node --check js/services/airQualityService.js && node --check js/services/aiAssistantService.js && node --check js/app.js && node --check api/gemini.js && node --check scripts/smoke-test-gemini.mjs",
+    "test": "node --test tests/core.test.js tests/security.test.js tests/services.test.js tests/accessibility.test.js tests/chimera.test.js tests/apex.test.js tests/acceptance.test.js tests/oracle.test.js",
+    "smoke:gemini": "node scripts/smoke-test-gemini.mjs",
     "verify": "npm run check:syntax && npm test"
   },
   "private": true

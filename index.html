@@ -462,31 +462,44 @@
       </div>
 
       <!-- MODULE 7: VayuShield AI Coach -->
+      <!-- MODULE 7: VayuShield AI Coach (Project ORACLE Conversational Workspace) -->
       <div id="panel-coach" role="tabpanel" aria-labelledby="tab-coach" class="panel tab-panel" hidden>
-        <div class="subhead-row">
+        <div class="coach-header">
           <div>
-            <p class="eyebrow">Server-Side Google Gemini 2.5 Flash</p>
+            <p class="eyebrow">Contextual Environmental Assistant</p>
             <h2 class="panel-title">VayuShield AI Coach</h2>
-            <p class="muted-text">Grounded in live telemetry, yesterday’s 24h average, dispersion windows, and room physics. Never turns missing data into zero.</p>
+            <p class="muted-text">Grounded in your active location telemetry, dispersion forecast, and room physics—with multi-turn session memory.</p>
           </div>
-          <div class="action-group">
-            <span id="coach-engine-badge" class="badge badge-teal">Ready</span>
-            <button id="btn-clear-chat" type="button" class="btn btn-ghost btn-sm">Clear Thread</button>
+          <div class="coach-status-bar">
+            <span id="coach-status-badge" class="badge badge-teal" role="status" aria-live="polite">Ready</span>
+            <span id="coach-model-badge" class="badge badge-neutral">Model: Server-Configured</span>
+            <span id="coach-context-badge" class="badge badge-modeled">Context: Pending</span>
+            <button id="btn-clear-chat" type="button" class="btn btn-ghost btn-sm">New Conversation</button>
           </div>
         </div>
 
-        <div id="coach-templates" class="chip-row" role="group" aria-label="Suggested scientific questions"></div>
+        <div id="coach-templates" class="chip-row" role="group" aria-label="Suggested environmental questions"></div>
 
-        <form id="coach-form" class="coach-form">
-          <label for="coach-input" class="field-label">Ask about current pollution, yesterday’s comparison, dispersion windows, or room CADR</label>
-          <textarea id="coach-input" rows="3" maxlength="360" required placeholder="Example: Compare today's 24-hour PM2.5 with yesterday and tell me the best practical daytime window."></textarea>
-          <div class="form-actions">
-            <button id="btn-ask-coach" type="submit" class="btn btn-primary">Ask VayuShield AI</button>
-            <span class="muted-text">API credentials remain strictly server-side.</span>
+        <div id="coach-output" class="coach-thread" aria-live="polite" aria-label="AI Coach conversation history"></div>
+
+        <form id="coach-form" class="coach-composer">
+          <label for="coach-input" class="sr-only">Ask VayuShield AI Coach a question</label>
+          <textarea
+            id="coach-input"
+            class="coach-textarea"
+            rows="2"
+            maxlength="500"
+            required
+            placeholder="Ask about current AQI, yesterday’s trend, opening windows, or room CADR… (Enter to send · Shift+Enter for newline)"
+          ></textarea>
+          <div class="coach-composer-bar">
+            <span id="coach-composer-hint" class="muted-text">Enter to send · Shift+Enter for new line · Server-side credentials only</span>
+            <div class="action-group">
+              <button id="btn-stop-coach" type="button" class="btn btn-ghost btn-sm" hidden>Stop</button>
+              <button id="btn-ask-coach" type="submit" class="btn btn-primary btn-sm">Send</button>
+            </div>
           </div>
         </form>
-
-        <div id="coach-output" class="coach-thread" aria-live="polite"></div>
       </div>
 
       <!-- MODULE 8: Community Clean-Air Network -->
