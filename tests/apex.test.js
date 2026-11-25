@@ -82,8 +82,12 @@ test('APEX 2.0 Visual, Performance & Honesty Audit: GPU-safe Liquid Glass, capsu
   assert.match(html, /<label[^>]*for="iaq-filter-select"/);
   assert.match(html, /class="mobile-bottom-nav"/);
 
-  const appJs = fs.readFileSync(path.join(ROOT, 'js/app.js'), 'utf8');
-  assert.match(appJs, /Illustrative Example/);
-  assert.match(appJs, /Saved on This Device/);
-  assert.match(appJs, /Not in CAMS model/);
+  const uiBundle = [
+    'js/app.js',
+    'js/ui/liveDashboardView.js',
+    'js/ui/communityView.js'
+  ].map((rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')).join('\n');
+  assert.match(uiBundle, /Illustrative Example/);
+  assert.match(uiBundle, /Saved on This Device/);
+  assert.match(uiBundle, /Not in CAMS model/);
 });

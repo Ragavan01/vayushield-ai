@@ -30,19 +30,18 @@ test('Security Helpers: sanitizeText strips markup/control chars and validators 
 });
 
 test('Security Static Audit: zero innerHTML, eval, Function, document.write, or client API-key handling', () => {
-  const sourceFiles = [
-    'js/core/security.js',
-    'js/core/cpcbAqi.js',
-    'js/core/dispersionEngine.js',
-    'js/core/indoorPhysics.js',
-    'js/core/impactModel.js',
-    'js/core/routineEngine.js',
-    'js/core/communityModeration.js',
-    'js/services/airQualityService.js',
-    'js/services/aiAssistantService.js',
-    'js/app.js',
-    'api/gemini.js'
-  ];
+  const walkJs = (dir) => (
+    fs.existsSync(dir)
+      ? fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) return walkJs(full);
+          return /\.js$/i.test(entry.name) ? [path.relative(ROOT, full)] : [];
+        })
+      : []
+  );
+
+  const sourceFiles = ['js', 'lib', 'api'].flatMap((d) => walkJs(path.join(ROOT, d)));
+  assert.ok(sourceFiles.length >= 20, 'Security static audit must cover all modular JS files');
 
   for (const rel of sourceFiles) {
     const code = stripComments(fs.readFileSync(path.join(ROOT, rel), 'utf8'));

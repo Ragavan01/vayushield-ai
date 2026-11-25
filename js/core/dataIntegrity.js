@@ -4,6 +4,7 @@
  * and timezone-exact freshness via provider utc_offset_seconds (IST, GMT, EST, JST).
  */
 
+/** @type {Readonly<Record<string, string>>} */
 export const FRESHNESS_STATES = Object.freeze({
   FRESH: 'Fresh',
   RECENT: 'Recently updated',
@@ -12,6 +13,12 @@ export const FRESHNESS_STATES = Object.freeze({
   UNAVAILABLE: 'Unavailable'
 });
 
+/**
+ * Sanitizes a raw pollutant concentration, rejecting null, non-finite, or negative inputs.
+ * @param {unknown} raw
+ * @param {number} [decimals=1]
+ * @returns {number | null}
+ */
 export function sanitizeConcentration(raw, decimals = 1) {
   if (raw === null || raw === undefined || raw === '') return null;
   const num = Number(raw);
@@ -19,6 +26,12 @@ export function sanitizeConcentration(raw, decimals = 1) {
   return Number(num.toFixed(decimals));
 }
 
+/**
+ * Converts a local or zoned ISO timestamp to UTC epoch milliseconds using provider utc_offset_seconds.
+ * @param {string | null | undefined} isoString
+ * @param {number | null} [utcOffsetSeconds=null]
+ * @returns {number | null}
+ */
 export function parseLocationTimestampUtc(isoString, utcOffsetSeconds = null) {
   if (!isoString || typeof isoString !== 'string') return null;
   const trimmed = isoString.trim();
@@ -31,14 +44,7 @@ export function parseLocationTimestampUtc(isoString, utcOffsetSeconds = null) {
   const match = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
   if (match && typeof utcOffsetSeconds === 'number' && Number.isFinite(utcOffsetSeconds)) {
     const [, y, m, d, hh, mm, ss] = match;
-    const wallUtcMs = Date.UTC(
-      Number(y),
-      Number(m) - 1,
-      Number(d),
-      Number(hh),
-      Number(mm),
-      Number(ss || 0)
-    );
+    const wallUtcMs = Date.UTC(Number(y), Number(m) - 1, Number(d), Number(hh), Number(mm), Number(ss || 0));
     return wallUtcMs - utcOffsetSeconds * 1000;
   }
 
@@ -46,17 +52,19 @@ export function parseLocationTimestampUtc(isoString, utcOffsetSeconds = null) {
   return Number.isFinite(fallbackMs) ? fallbackMs : null;
 }
 
+/**
+ * Separates projected concentration values from signed delta comparisons against a reference baseline.
+ * @param {unknown} projected
+ * @param {unknown} reference
+ * @param {string} [unit='µg/m³']
+ * @returns {{ projected: number | null, delta: number | null, projectedText: string, deltaText: string }}
+ */
 export function formatProjectedAndDelta(projected, reference, unit = 'µg/m³') {
   const safeProj = sanitizeConcentration(projected, 1);
   const safeRef = sanitizeConcentration(reference, 1);
 
   if (safeProj === null) {
-    return {
-      projected: null,
-      delta: null,
-      projectedText: 'Unavailable',
-      deltaText: 'Baseline comparison unavailable'
-    };
+    return { projected: null, delta: null, projectedText: 'Unavailable', deltaText: 'Baseline comparison unavailable' };
   }
 
   const projectedText = `Projected: ${safeProj} ${unit}`;
@@ -77,24 +85,21 @@ export function formatProjectedAndDelta(projected, reference, unit = 'µg/m³') 
   };
 }
 
+/**
+ * Evaluates telemetry freshness relative to measurement timestamp and source cadence.
+ * @param {string | null | undefined} measurementIso
+ * @param {number} [nowMs=Date.now()]
+ * @param {{ isStaleFallback?: boolean, sourceType?: string, utcOffsetSeconds?: number | null }} [options={}]
+ * @returns {{ state: string, ageMinutes: number | null, badgeTone: string, label: string }}
+ */
 export function evaluateDataFreshness(measurementIso, nowMs = Date.now(), options = {}) {
   if (options.isStaleFallback) {
-    return {
-      state: FRESHNESS_STATES.STALE,
-      ageMinutes: null,
-      badgeTone: 'alert',
-      label: 'Stale (Last Valid Cache)'
-    };
+    return { state: FRESHNESS_STATES.STALE, ageMinutes: null, badgeTone: 'alert', label: 'Stale (Last Valid Cache)' };
   }
 
   const parsedMs = parseLocationTimestampUtc(measurementIso, options.utcOffsetSeconds);
   if (parsedMs === null) {
-    return {
-      state: FRESHNESS_STATES.UNAVAILABLE,
-      ageMinutes: null,
-      badgeTone: 'neutral',
-      label: 'Timestamp unavailable'
-    };
+    return { state: FRESHNESS_STATES.UNAVAILABLE, ageMinutes: null, badgeTone: 'neutral', label: 'Timestamp unavailable' };
   }
 
   const ageMinutes = Math.max(0, Math.round((nowMs - parsedMs) / 60_000));
@@ -103,18 +108,17 @@ export function evaluateDataFreshness(measurementIso, nowMs = Date.now(), option
   const recentLimit = isStation ? 150 : 210;
   const delayedLimit = isStation ? 270 : 420;
 
-  if (ageMinutes <= freshLimit) {
-    return { state: FRESHNESS_STATES.FRESH, ageMinutes, badgeTone: 'teal', label: 'Fresh' };
-  }
-  if (ageMinutes <= recentLimit) {
-    return { state: FRESHNESS_STATES.RECENT, ageMinutes, badgeTone: 'teal', label: 'Recently updated' };
-  }
-  if (ageMinutes <= delayedLimit) {
-    return { state: FRESHNESS_STATES.DELAYED, ageMinutes, badgeTone: 'warn', label: 'Delayed' };
-  }
+  if (ageMinutes <= freshLimit) return { state: FRESHNESS_STATES.FRESH, ageMinutes, badgeTone: 'teal', label: 'Fresh' };
+  if (ageMinutes <= recentLimit) return { state: FRESHNESS_STATES.RECENT, ageMinutes, badgeTone: 'teal', label: 'Recently updated' };
+  if (ageMinutes <= delayedLimit) return { state: FRESHNESS_STATES.DELAYED, ageMinutes, badgeTone: 'warn', label: 'Delayed' };
   return { state: FRESHNESS_STATES.STALE, ageMinutes, badgeTone: 'alert', label: 'Stale' };
 }
 
+/**
+ * Constructs an immutable normalized environmental reading with explicit provenance metadata.
+ * @param {Record<string, any>} input
+ * @returns {Readonly<Record<string, any>>}
+ */
 export function createEnvironmentalReading(input) {
   const safeValue = sanitizeConcentration(input.value, input.unit === 'mg/m³' ? 3 : 1);
   const qualityStatus = safeValue === null
@@ -129,11 +133,7 @@ export function createEnvironmentalReading(input) {
     unit: input.unit,
     source: input.source,
     source_type: input.sourceType,
-    location: Object.freeze({
-      name: input.location.name,
-      lat: input.location.lat,
-      lon: input.location.lon
-    }),
+    location: Object.freeze({ name: input.location.name, lat: input.location.lat, lon: input.location.lon }),
     measurement_time: input.measurementTime,
     retrieval_time: input.retrievalTime,
     averaging_period: input.averagingPeriod,

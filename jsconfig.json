@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": true,
+    "strict": false,
+    "noEmit": true
+  },
+  "include": [
+    "api/**/*.js",
+    "lib/**/*.js",
+    "js/**/*.js",
+    "scripts/**/*.mjs",
+    "tests/**/*.js"
+  ],
+  "exclude": ["node_modules"]
+}

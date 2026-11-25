@@ -65,7 +65,7 @@ export function isSafeHttpUrl(url) {
   try {
     const parsed = new URL(url);
     return parsed.protocol === 'https:' || parsed.protocol === 'http:';
-  } catch {
+  } catch (_urlErr) {
     return false;
   }
 }
