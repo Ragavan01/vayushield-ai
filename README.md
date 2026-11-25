@@ -4,7 +4,7 @@
 
 **Live Production App:** [https://vayushield-ai-five.vercel.app/](https://vayushield-ai-five.vercel.app/)
 
-VayuShield is a scientific urban air quality, atmospheric dispersion, and indoor air-engineering platform combining live Copernicus CAMS / Open-Meteo telemetry, validated 8-pollutant Indian CPCB NAQI calculations, steady-state indoor filtration physics, daylight-aware daily scheduling, and a server-proxied **Google Gemini 2.5 Flash** coach.
+VayuShield is a scientific urban air quality, atmospheric dispersion, and indoor air-engineering platform combining live Copernicus CAMS / Open-Meteo telemetry, validated 8-pollutant Indian CPCB NAQI calculations, steady-state indoor filtration physics, daylight-aware daily scheduling, and a server-proxied **Google Gemini 3.5 Flash** coach.
 
 ---
 
